@@ -10,12 +10,25 @@ from playwright.async_api import async_playwright
 SERVER_HOST = sys.argv[1] if len(sys.argv) > 1 else "76.13.18.146"
 SERVER_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 5099
 
+# Try CloakBrowser for anti-detection, fallback to vanilla Playwright
+CLOAK_AVAILABLE = False
+try:
+    from cloakbrowser import launch_async as cloak_launch
+    CLOAK_AVAILABLE = True
+    print("🔒 CloakBrowser loaded — anti-detection ON", flush=True)
+except ImportError:
+    print("⚠️ CloakBrowser not installed — using vanilla Chromium", flush=True)
+    print("   Install: pip install cloakbrowser", flush=True)
+
 async def launch_browser(pw):
-    """Launch fresh browser + page"""
-    browser = await pw.chromium.launch(
-        headless=False,
-        args=['--start-maximized', '--disable-blink-features=AutomationControlled']
-    )
+    """Launch fresh browser + page. Uses CloakBrowser if available for anti-detection."""
+    if CLOAK_AVAILABLE:
+        browser = await cloak_launch(headless=False)
+    else:
+        browser = await pw.chromium.launch(
+            headless=False,
+            args=['--start-maximized', '--disable-blink-features=AutomationControlled']
+        )
     page = await browser.new_page()
     return browser, page
 
