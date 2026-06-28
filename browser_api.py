@@ -399,6 +399,6 @@ if __name__ == "__main__":
     start_browser()
     
     try:
-        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=False)
     finally:
         close_browser()
