@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
+*.pyo
+.env
+screenshots/
 accounts.json
 config.json
-.DS_Store
