@@ -514,7 +514,8 @@ thread = None
 
 @app.route("/")
 def index():
-    return render_template_string(WEB_HTML.format(account_count=len(accounts)))
+    html = WEB_HTML.replace("{account_count}", str(len(accounts)))
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 @app.route("/api/accounts", methods=["POST"])
 def api_accounts():
