@@ -274,10 +274,16 @@ class Handler(BaseHTTPRequestHandler):
 # ============================================================
 from socketserver import ThreadingMixIn
 
-class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-    """Handle requests in separate threads (built-in ThreadingMixIn)"""
+# NO threading — Playwright sync API only works on main thread
+# Using plain HTTPServer with sequential request handling
+#
+# We use request queue: each request is handled synchronously
+# on the main thread. Since only one client (Hermes), this is fine.
+
+class SequentialHTTPServer(HTTPServer):
+    """Single-threaded HTTP server — Playwright requires main thread"""
     allow_reuse_address = True
-    daemon_threads = True
+    timeout = 0.5  # Allow KeyboardInterrupt detection
 
 if __name__ == "__main__":
     port = int(os.getenv("API_PORT", "5001"))
@@ -288,7 +294,7 @@ if __name__ == "__main__":
     
     ensure_browser()
     
-    server = ThreadedHTTPServer(("0.0.0.0", port), Handler)
+    server = SequentialHTTPServer(("0.0.0.0", port), Handler)
     log(f"Listening on :{port}", "S")
     
     try:
