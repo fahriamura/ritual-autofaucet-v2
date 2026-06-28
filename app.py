@@ -167,6 +167,10 @@ class AutoFaucet:
             pass
         
         wait_for_user(self.page, "Kalo ada verification captcha — solve manual", 60000)
+        
+        # Auto klik Open App button setelah join
+        self.auto_click_open_app()
+        
         log("Join server step selesai", "S")
     
     def get_wallet_address(self, wallet_index):
@@ -198,6 +202,19 @@ class AutoFaucet:
         
         return f"0x{random_name(40)}"  # fallback dummy
     
+    def auto_click_open_app(self):
+        """Auto klik button 'Open App' di Discord dengan class buttonChildrenWrapper_a22cb0."""
+        try:
+            btn = self.page.locator('.buttonChildrenWrapper_a22cb0')
+            if btn.count() > 0:
+                btn.first.click()
+                log("✅ Auto-klik 'Open App' button!", "S")
+                time.sleep(3)
+                return True
+        except Exception as e:
+            log(f"Open App button not found: {e}", "W")
+        return False
+    
     def process_channel_ritual(self):
         """Proses channel Ritual Discord:
         - /get-code
@@ -207,6 +224,9 @@ class AutoFaucet:
         """
         log("🔄 Proses channel Ritual...", "I")
         
+        # Auto klik Open App button kalo ada
+        self.auto_click_open_app()
+        
         # Cari channel verification
         wait_for_user(self.page, "Navigasi MANUAL ke channel verification & solve captcha", 120000)
         log("Verification done (asumsi)", "S")
@@ -214,6 +234,9 @@ class AutoFaucet:
         # Ke channel academy-welcome
         wait_for_user(self.page, "Navigasi MANUAL ke #academy-welcome & klik link wallet", 60000)
         log("Wallet link clicked (asumsi)", "S")
+        
+        # Auto klik Open App lagi kalo muncul setelah klik link
+        self.auto_click_open_app()
         
         # Ke channel rank, ketik /get-code
         wait_for_user(self.page, "Navigasi MANUAL ke #rank & ketik /get-code", 60000)
