@@ -1,70 +1,77 @@
 #!/usr/bin/env python3
 """
-Browser HTTP Server — single-thread, no Flask, no greenlet conflict
-Port 5001 — pure http.server + Playwright
+Browser Remote Server — single-thread HTTP, no Flask, no greenlet issues.
+Responds to curl commands from Hermes.
 """
-import os, sys, json, time, base64, traceback
+import json, time, base64, os, sys, threading
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
-
-BASE = os.path.dirname(os.path.abspath(__file__))
-SS_DIR = os.path.join(BASE, "screenshots")
-os.makedirs(SS_DIR, exist_ok=True)
 
 LOG = []
 def log(msg, t="I"):
-    p = {"I":"·","S":"+","W":"!","E":"X","C":"*","T":"\""}
+    p = {"I":"·", "S":"+", "W":"!", "E":"x", "C":"~", "T":"`"}
     ts = datetime.now().strftime('%H:%M:%S')
     line = f"[{ts}] {p.get(t,'·')} {msg}"
-    LOG.append(line); print(line, flush=True)
+    LOG.append(line)
+    if len(LOG) > 200: LOG.pop(0)
+    print(line, flush=True)
 
-# Playwright — launched once
-pw = None; browser = None; context = None; page = None
-
+# Starts here
 from playwright.sync_api import sync_playwright
 
-def start():
-    global pw, browser, context, page
-    if browser: return
-    pw = sync_playwright().start()
-    browser = pw.chromium.launch(headless=False, args=['--start-maximized','--disable-blink-features=AutomationControlled','--no-sandbox'])
-    context = browser.new_context(no_viewport=True)
-    page = context.new_page()
-    page.set_default_timeout(15000)
-    log("Browser VISIBLE started!", "S")
+STATE = {"pw": None, "browser": None, "context": None, "page": None}
 
-def shutdown():
-    try:
-        if browser: browser.close()
-        if pw: pw.stop()
-    except: pass
+def page():
+    return STATE.get("page")
 
-def act_screenshot():
+def start_browser():
+    if STATE["browser"]: return True
     try:
-        b = page.screenshot(full_page=False)
-        return base64.b64encode(b).decode()
+        pw = sync_playwright().start()
+        b = pw.chromium.launch(
+            headless=False,
+            args=['--start-maximized','--disable-blink-features=AutomationControlled',
+                  '--no-sandbox','--disable-dev-shm-usage']
+        )
+        ctx = b.new_context(no_viewport=True)
+        p = ctx.new_page()
+        p.set_default_timeout(15000)
+        STATE.update(pw=pw, browser=b, context=ctx, page=p)
+        log("Browser VISIBLE started!", "S")
+        return True
     except Exception as e:
-        log(f"screenshot error: {e}", "X")
-        return None
+        log(f"Browser error: {e}", "E")
+        return False
 
-def act_click_text(text):
+def screenshot_b64():
+    p = page()
+    if not p: return None
+    try:
+        b = p.screenshot(full_page=False)
+        return base64.b64encode(b).decode()
+    except: return None
+
+def click_text(text):
+    p = page()
+    if not p: return False
     sels = [f'text={text}', f'*:text-is("{text}")', f'*:has-text("{text}")',
-            f'button:has-text("{text}")', f'a:has-text("{text}")', f'span:has-text("{text}")']
+            f'button:has-text("{text}")', f'span:has-text("{text}")']
     for w in text.split()[:3]:
         sels.extend([f'text={w}', f'*:has-text("{w}")'])
+    
     for sel in sels:
         try:
-            el = page.locator(sel)
+            el = p.locator(sel)
             if el.count() > 0 and el.first.is_visible():
                 el.first.click(timeout=3000)
                 time.sleep(0.5)
                 return True
         except: pass
-    for fr in page.frames[1:]:
+    
+    for f in p.frames[1:]:
         for sel in [f'text={text}', f'*:has-text("{text}")']:
             try:
-                el = fr.locator(sel)
+                el = f.locator(sel)
                 if el.count() > 0:
                     el.first.click(timeout=3000)
                     time.sleep(0.5)
@@ -72,147 +79,151 @@ def act_click_text(text):
             except: pass
     return False
 
-def act_type(text, target=None):
+def type_text(text, target=None):
+    p = page()
+    if not p: return False
     if target:
-        for sel in [f'input:has-text("{target}")', 'input[type="text"]', 'input[type="email"]',
-                    'input[type="password"]', 'input:not([type="hidden"])', 'textarea',
-                    'div[contenteditable="true"]', 'div[role="textbox"]']:
+        for sel in [f'input[placeholder*="{target}"]', 'input[type="text"]', 'input[type="email"]',
+                    'input:not([type="hidden"])', 'div[contenteditable="true"]']:
             try:
-                el = page.locator(sel)
-                if el.count() > 0:
-                    el.first.click(); time.sleep(0.2)
-                    el.first.fill(text); time.sleep(0.3)
+                el = p.locator(sel)
+                if el.count() > 0 and el.first.is_visible():
+                    el.first.fill(text)
                     return True
             except: pass
-    page.keyboard.type(text, delay=50); time.sleep(0.3)
+    p.keyboard.type(text, delay=50)
     return True
 
-def act_navigate(url):
-    page.goto(url, wait_until="domcontentloaded", timeout=30000)
-    time.sleep(2)
-    return True
-
-def act_check_continue():
-    for txt in ["Continue in Browser", "Open in Browser", "Continue", "Open App"]:
-        for sel in [f'text={txt}', f'*:text-is("{txt}")', f'*:has-text("{txt}")']:
-            try:
-                el = page.locator(sel)
-                if el.count() > 0:
-                    el.first.click(timeout=2000)
-                    time.sleep(1)
-                    return True
-            except: pass
-    return False
-
-def get_status():
-    try:
-        return json.dumps({
-            "browser": browser is not None,
-            "url": page.url,
-            "title": page.title(),
-            "text": page.evaluate("document.body.innerText")[:2000]
-        })
-    except:
-        return json.dumps({"browser": browser is not None, "error": "page not ready"})
-
+# ── HTTP Handler ────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):
-        pass  # silent
-    
-    def _send(self, code, body, ctype="application/json"):
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        if isinstance(body, str): body = body.encode()
-        self.wfile.write(body)
-    
     def do_GET(self):
-        p = urlparse(self.path)
-        if p.path == "/api/status":
-            self._send(200, get_status())
-        elif p.path == "/api/screenshot":
-            b64 = act_screenshot()
-            self._send(200, json.dumps({"success": True, "image_base64": b64}) if b64 else json.dumps({"success": False}))
-        elif p.path == "/api/logs":
-            n = int(parse_qs(p.query).get("n", [50])[0])
-            self._send(200, json.dumps({"logs": LOG[-n:]}))
-        else:
-            self._send(200, json.dumps({
-                "name": "Browser Server",
-                "endpoints": ["GET /api/status", "GET /api/screenshot", "GET /api/logs", "POST /api/action"]
-            }))
+        try:
+            if self.path.startswith("/api/status"):
+                p = page()
+                resp = {
+                    "browser": STATE["browser"] is not None,
+                    "url": p.url if p else "",
+                    "title": p.title() if p else "",
+                    "logs": LOG[-10:]
+                }
+                self._json(resp)
+            
+            elif self.path.startswith("/api/screenshot"):
+                b64 = screenshot_b64()
+                if b64:
+                    self._json({"success": True, "image_base64": b64})
+                else:
+                    self._json({"success": False}, 500)
+            
+            else:
+                self._json({"name": "Browser Remote Server", "status": "ok"})
+        except Exception as e:
+            self._json({"error": str(e)}, 500)
     
     def do_POST(self):
         try:
-            cl = int(self.headers.get("Content-Length", 0))
-            raw = self.rfile.read(cl) if cl else b"{}"
-            data = json.loads(raw.decode())
-        except:
-            data = {}
+            length = int(self.headers.get('content-length', 0))
+            body = json.loads(self.rfile.read(length)) if length > 0 else {}
+            action = body.get("action", "")
+            p = page()
+            if not p:
+                self._json({"success": False, "error": "Browser not ready"})
+                return
+            
+            if action == "navigate":
+                url = body.get("url", "")
+                p.goto(url, wait_until="domcontentloaded", timeout=30000)
+                time.sleep(2)
+                self._json({"success": True, "url": url})
+            
+            elif action == "click_text":
+                text = body.get("text", "")
+                ok = click_text(text)
+                self._json({"success": ok, "text": text})
+            
+            elif action == "type":
+                text = body.get("text", "")
+                target = body.get("target", "")
+                ok = type_text(text, target)
+                self._json({"success": ok})
+            
+            elif action == "press_key":
+                key = body.get("key", "Enter")
+                p.keyboard.press(key)
+                self._json({"success": True})
+            
+            elif action == "get_text":
+                txt = p.evaluate("document.body.innerText")
+                self._json({"success": True, "text": txt[:10000]})
+            
+            elif action == "wait":
+                sec = int(body.get("seconds", 3))
+                time.sleep(sec)
+                self._json({"success": True, "waited": sec})
+            
+            elif action == "screenshot":
+                b64 = screenshot_b64()
+                self._json({"success": True, "image_base64": b64})
+            
+            elif action == "check_continue":
+                found = False
+                for txt in ["Continue in Browser", "Open in Browser", "Continue"]:
+                    if click_text(txt):
+                        found = True
+                        break
+                self._json({"success": True, "clicked_continue": found})
+            
+            elif action == "multi":
+                results = []
+                for a in body.get("actions", []):
+                    at = a.get("action", "")
+                    if at == "click_text":
+                        results.append({"action": at, "text": a.get("text"), "ok": click_text(a.get("text",""))})
+                    elif at == "wait":
+                        time.sleep(int(a.get("seconds",2)))
+                        results.append({"action": at})
+                    elif at == "navigate":
+                        p.goto(a.get("url",""), wait_until="domcontentloaded", timeout=30000)
+                        results.append({"action": at})
+                    elif at == "type":
+                        type_text(a.get("text",""), a.get("target",""))
+                        results.append({"action": at})
+                    elif at == "press_key":
+                        p.keyboard.press(a.get("key","Enter"))
+                        results.append({"action": at})
+                self._json({"success": True, "results": results})
+            
+            else:
+                self._json({"success": False, "error": f"Unknown: {action}"})
         
-        p = urlparse(self.path)
-        
-        if p.path == "/api/action":
-            action = data.get("action", "")
-            try:
-                if action == "screenshot":
-                    b64 = act_screenshot()
-                    self._send(200, json.dumps({"success": True, "image_base64": b64}))
-                elif action == "click_text":
-                    txt = data.get("text", "")
-                    ok = act_click_text(txt)
-                    self._send(200, json.dumps({"success": ok, "text": txt}))
-                elif action == "type":
-                    txt = data.get("text", "")
-                    target = data.get("target", "")
-                    ok = act_type(txt, target)
-                    self._send(200, json.dumps({"success": ok}))
-                elif action == "navigate":
-                    url = data.get("url", "")
-                    act_navigate(url)
-                    self._send(200, json.dumps({"success": True, "url": url}))
-                elif action == "press_key":
-                    k = data.get("key", "Enter")
-                    page.keyboard.press(k)
-                    self._send(200, json.dumps({"success": True, "key": k}))
-                elif action == "scroll":
-                    d = data.get("direction", "down")
-                    page.evaluate(f"window.scrollBy(0, {500 if d=='down' else -500})")
-                    self._send(200, json.dumps({"success": True}))
-                elif action == "get_text":
-                    txt = page.evaluate("document.body.innerText")
-                    self._send(200, json.dumps({"success": True, "text": txt[:10000]}))
-                elif action == "wait":
-                    sec = int(data.get("seconds", 3))
-                    time.sleep(sec)
-                    self._send(200, json.dumps({"success": True, "waited": sec}))
-                elif action == "check_continue":
-                    found = act_check_continue()
-                    self._send(200, json.dumps({"success": True, "clicked": found}))
-                elif action == "evaluate":
-                    js = data.get("js", "")
-                    r = page.evaluate(js)
-                    self._send(200, json.dumps({"success": True, "result": str(r)[:2000]}))
-                else:
-                    self._send(400, json.dumps({"success": False, "error": f"unknown: {action}"}))
-            except Exception as e:
-                self._send(500, json.dumps({"success": False, "error": str(e)[:500]}))
-        else:
-            self._send(404, json.dumps({"error": "not found"}))
+        except Exception as e:
+            self._json({"success": False, "error": str(e)})
+    
+    def _json(self, data, code=200):
+        j = json.dumps(data).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(j)))
+        self.end_headers()
+        self.wfile.write(j)
+    
+    def log_message(self, format, *args):
+        pass  # suppress default logging
 
+# ── Main ────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.getenv("API_PORT", "5001"))
-    log("="*50)
+    log("="*50, "I")
     log("BROWSER SERVER (single-thread HTTP)", "S")
     log(f"Port {port}", "S")
-    log("="*50)
+    log("="*50, "I")
     
-    start()
-    srv = HTTPServer(("0.0.0.0", port), Handler)
+    start_browser()
+    
+    server = HTTPServer(("0.0.0.0", port), Handler)
     try:
-        srv.serve_forever()
-    finally:
-        srv.server_close()
-        shutdown()
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.shutdown()
+        if STATE["browser"]: STATE["browser"].close()
+        if STATE["pw"]: STATE["pw"].stop()
