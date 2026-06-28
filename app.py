@@ -83,24 +83,52 @@ def log(msg, type="I"):
 
 def wait_for_user(page, msg, timeout=300000):
     """Tampilkan pesan & tunggu user interaksi/klik manual.
-    Sambil nunggu, periodically cek Open in Browser button."""
+    Sambil nunggu, periodically cek Continue di main page, iframe, shadow DOM."""
     log(f"{msg} — ( klik manual, menunggu {timeout//1000}s )", "H")
     try:
         for _ in range(timeout // 2000):
-            # Cek Open in Browser button tiap 2 detik
+            # Cek Continue in Browser tiap 2 detik — semua konteks
             try:
-                # Semua selector Open/Continue in Browser
+                # Main page selectors
                 for sel in ['.buttonChildrenWrapper_a22cb0', 'button:has-text("Open")', 
                            'a:has-text("Open")', '[role="button"]:has-text("Open")',
                            'text=Open in Browser',
-                           'span.lineClamp1__4bd52:has-text("Continue in Browser")',
-                           'text=Continue in Browser']:
-                    el = page.locator(sel)
-                    if el.count() > 0:
-                        el.first.click()
-                        log("✅ Auto-klik Open button (while waiting)!", "S")
-                        time.sleep(2)
-                        break
+                           'span.lineClamp1__4bd52', 'text=Continue in Browser',
+                           '*:text-is("Continue in Browser")']:
+                    try:
+                        el = page.locator(sel)
+                        if el.count() > 0 and el.first.is_visible():
+                            el.first.click()
+                            log(f"✅ Auto-klik Continue in Browser (while waiting)!", "S")
+                            time.sleep(2)
+                            break
+                    except:
+                        pass
+                
+                # Cek di semua iframe
+                for frame in page.frames[1:]:
+                    for sel in ['text=Continue in Browser', 'span.lineClamp1__4bd52',
+                                '*:text-is("Continue in Browser")']:
+                        try:
+                            el = frame.locator(sel)
+                            if el.count() > 0:
+                                el.first.click()
+                                log(f"✅ Auto-klik Continue di iframe (while waiting)!", "S")
+                                time.sleep(2)
+                                break
+                        except:
+                            pass
+                
+                # JS force-click fallback
+                page.evaluate("""() => {
+                    const texts = ['Continue in Browser', 'Open in Browser', 'Open App'];
+                    for (const t of texts) {
+                        const xpath = "//*[text()[contains(., '" + t + "')]]";
+                        const r = document.evaluate(xpath, document, null,
+                            XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                        if (r.singleNodeValue) { r.singleNodeValue.click(); return; }
+                    }
+                }""")
             except:
                 pass
             page.wait_for_timeout(2000)
@@ -225,66 +253,123 @@ class AutoFaucet:
         return f"0x{random_name(40)}"  # fallback dummy
     
     def auto_click_open_app(self):
-        """Auto klik button 'Open App' / 'Open in Browser' di Discord."""
+        """Auto klik button 'Continue in Browser' / 'Open App' di Discord.
+        Support: main DOM, iframe, shadow DOM, JS fallback."""
+        
+        # ── FASE 1: Coba langsung di main page ──────────────────────
+        selectors = [
+            '.buttonChildrenWrapper_a22cb0',
+            'button:has-text("Open")',
+            'a:has-text("Open")',
+            '[role="button"]:has-text("Open")',
+            'text=Open in Browser',
+            'span.lineClamp1__4bd52',
+            'span:text("Continue in Browser")',
+            'text=Continue in Browser',
+            # General catch-all
+            '*:text-is("Continue in Browser")',
+            '*:text-is("Open in Browser")',
+            '*:text-is("Open App")',
+        ]
+        
+        # Coba tiap selector di main page
+        for sel in selectors:
+            try:
+                el = self.page.locator(sel)
+                if el.count() > 0 and el.first.is_visible():
+                    el.first.click()
+                    log(f"✅ Auto-klik '{sel}' di main page!", "S")
+                    time.sleep(3)
+                    return True
+            except:
+                pass
+
+        # ── FASE 2: Cari di semua iframe ────────────────────────────
+        log("🔍 Mencari 'Continue in Browser' di iframe...", "I")
+        for i in range(10):  # max 10 iframes
+            try:
+                frame = self.page.frame(name=f"discord-activity-{i}")
+                if frame:
+                    for sel in ['text=Continue in Browser', '*:text-is("Continue in Browser")',
+                                'span.lineClamp1__4bd52', 'button:has-text("Open")', 'text=Open in Browser']:
+                        try:
+                            el = frame.locator(sel)
+                            if el.count() > 0:
+                                el.first.click()
+                                log(f"✅ Auto-klik Continue di iframe {i}!", "S")
+                                time.sleep(3)
+                                return True
+                        except:
+                            pass
+            except:
+                pass
+        
+        # Cari semua iframe secara generic
         try:
-            # Try 1: Specific class
-            btn = self.page.locator('.buttonChildrenWrapper_a22cb0')
-            if btn.count() > 0:
-                btn.first.click()
-                log("✅ Auto-klik button (.buttonChildrenWrapper_a22cb0)!", "S")
+            all_frames = self.page.frames
+            for frame in all_frames[1:]:  # skip main page
+                for sel in ['text=Continue in Browser', '*:text-is("Continue in Browser")',
+                            'span.lineClamp1__4bd52', 'button:has-text("Open")']:
+                    try:
+                        el = frame.locator(sel)
+                        if el.count() > 0 and el.first.is_visible():
+                            el.first.click()
+                            log(f"✅ Auto-klik Continue di iframe {frame.name}!", "S")
+                            time.sleep(3)
+                            return True
+                    except:
+                        pass
+        except:
+            pass
+
+        # ── FASE 3: JavaScript force-click di semua shadow root ────
+        log("🔍 JavaScript force-click 'Continue in Browser'...", "I")
+        try:
+            clicked = self.page.evaluate("""() => {
+                // Cari semua teks yg cocok
+                const texts = ['Continue in Browser', 'Open in Browser', 'Open App'];
+                for (const t of texts) {
+                    // XPath fallback
+                    const xpath = `//*[text()[contains(., '${t}')]]`;
+                    const result = document.evaluate(xpath, document, null,
+                        XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                    if (result.singleNodeValue) {
+                        result.singleNodeValue.click();
+                        return 'XPath click: ' + t;
+                    }
+                    // Cari di semua shadow root
+                    const walker = document.createTreeWalker(document.body, 4, null, false);
+                    let node;
+                    while (node = walker.nextNode()) {
+                        if (node.shadowRoot) {
+                            const el = node.shadowRoot.querySelector(
+                                'span.lineClamp1__4bd52, [class*="lineClamp"], ' +
+                                '[class*="button"]');
+                            if (el && el.textContent.includes('Continue')) {
+                                el.click();
+                                return 'Shadow DOM click: ' + el.textContent;
+                            }
+                            // XPath di shadow root
+                            const sx = node.shadowRoot.evaluate(
+                                xpath, node.shadowRoot, null,
+                                XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                            if (sx.singleNodeValue) {
+                                sx.singleNodeValue.click();
+                                return 'Shadow XPath: ' + t;
+                            }
+                        }
+                    }
+                }
+                return null;
+            }""")
+            if clicked:
+                log(f"✅ JS force-click: {clicked}", "S")
                 time.sleep(3)
                 return True
-            
-            # Try 2: Any button with "Open" text
-            btn2 = self.page.locator('button:has-text("Open")')
-            if btn2.count() > 0:
-                btn2.first.click()
-                log("✅ Auto-klik button (text=Open)!", "S")
-                time.sleep(3)
-                return True
-            
-            # Try 3: Any link with "Open" text
-            btn3 = self.page.locator('a:has-text("Open")')
-            if btn3.count() > 0:
-                btn3.first.click()
-                log("✅ Auto-klik link (text=Open)!", "S")
-                time.sleep(3)
-                return True
-            
-            # Try 4: role=button with "Open"
-            btn4 = self.page.locator('[role="button"]:has-text("Open")')
-            if btn4.count() > 0:
-                btn4.first.click()
-                log("✅ Auto-klik role=button (text=Open)!", "S")
-                time.sleep(3)
-                return True
-            
-            # Try 5: Any element with "Open in Browser" text
-            btn5 = self.page.locator('text=Open in Browser')
-            if btn5.count() > 0:
-                btn5.first.click()
-                log("✅ Auto-klik 'Open in Browser'!", "S")
-                time.sleep(3)
-                return True
-            
-            # Try 6: span dengan class lineClamp1 + "Continue in Browser"
-            btn6 = self.page.locator('span.lineClamp1__4bd52:has-text("Continue in Browser")')
-            if btn6.count() > 0:
-                btn6.first.click()
-                log("✅ Auto-klik 'Continue in Browser' (span)!", "S")
-                time.sleep(3)
-                return True
-            
-            # Try 7: Any element with "Continue in Browser" text
-            btn7 = self.page.locator('text=Continue in Browser')
-            if btn7.count() > 0:
-                btn7.first.click()
-                log("✅ Auto-klik 'Continue in Browser' (text)!", "S")
-                time.sleep(3)
-                return True
-                
         except Exception as e:
-            log(f"Auto-click error: {e}", "W")
+            log(f"JS force-click error: {e}", "W")
+
+        log("ℹ️ 'Continue in Browser' gak ditemukan — lanjut...", "I")
         return False
     
     def process_channel_ritual(self):
