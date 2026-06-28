@@ -32,7 +32,9 @@ Contoh:
       {"action":"click_text","text":"Log In"}
     ]}'
 """
-import os, sys, subprocess, time, signal
+import os, sys, subprocess, time, signal, platform
+
+HOST = platform.node() or "localhost"
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 API_SCRIPT = os.path.join(BASE, "browser_api.py")
@@ -46,9 +48,9 @@ if __name__ == "__main__":
     log(f"🧠 AI: Hermes (vision + terminal)")
     log(f"📸 Screenshots: {os.path.join(BASE, 'screenshots')}/")
     log(f"")
-    log(f"  curl {os.uname().nodename}:{port}/api/status")
-    log(f"  curl {os.uname().nodename}:{port}/api/screenshot")
-    log(f"  curl -X POST {os.uname().nodename}:{port}/api/action -d '{{\"action\":\"click_text\",\"text\":\"Login\"}}'")
+    log(f"  curl http://{HOST}:{port}/api/status")
+    log(f"  curl http://{HOST}:{port}/api/screenshot")
+    log(f"  curl -X POST http://{HOST}:{port}/api/action -d '{{\"action\":\"click_text\",\"text\":\"Login\"}}'")
     log(f"")
 
     # Start browser API
