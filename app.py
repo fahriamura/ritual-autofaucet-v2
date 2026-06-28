@@ -82,10 +82,25 @@ def log(msg, type="I"):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {prefix.get(type,'ℹ️')} {msg}", flush=True)
 
 def wait_for_user(page, msg, timeout=300000):
-    """Tampilkan pesan & tunggu user interaksi/klik manual."""
+    """Tampilkan pesan & tunggu user interaksi/klik manual.
+    Sambil nunggu, periodically cek Open in Browser button."""
     log(f"{msg} — ( klik manual, menunggu {timeout//1000}s )", "H")
     try:
-        page.wait_for_timeout(timeout)
+        for _ in range(timeout // 2000):
+            # Cek Open in Browser button tiap 2 detik
+            try:
+                for sel in ['.buttonChildrenWrapper_a22cb0', 'button:has-text("Open")', 
+                           'a:has-text("Open")', '[role="button"]:has-text("Open")',
+                           'text=Open in Browser']:
+                    el = page.locator(sel)
+                    if el.count() > 0:
+                        el.first.click()
+                        log("✅ Auto-klik Open button (while waiting)!", "S")
+                        time.sleep(2)
+                        break
+            except:
+                pass
+            page.wait_for_timeout(2000)
     except:
         pass
 
@@ -143,6 +158,10 @@ class AutoFaucet:
         try:
             self.page.wait_for_url("**/channels/**", timeout=120000)
             log("Login sukses! Captcha solved ✅", "S")
+            
+            # Auto klik Open in Browser setelah login
+            self.auto_click_open_app()
+            
             return True
         except PwTimeout:
             # Cek apakah masih di halaman login
@@ -203,16 +222,50 @@ class AutoFaucet:
         return f"0x{random_name(40)}"  # fallback dummy
     
     def auto_click_open_app(self):
-        """Auto klik button 'Open App' di Discord dengan class buttonChildrenWrapper_a22cb0."""
+        """Auto klik button 'Open App' / 'Open in Browser' di Discord."""
         try:
+            # Try 1: Specific class
             btn = self.page.locator('.buttonChildrenWrapper_a22cb0')
             if btn.count() > 0:
                 btn.first.click()
-                log("✅ Auto-klik 'Open App' button!", "S")
+                log("✅ Auto-klik button (.buttonChildrenWrapper_a22cb0)!", "S")
                 time.sleep(3)
                 return True
+            
+            # Try 2: Any button with "Open" text
+            btn2 = self.page.locator('button:has-text("Open")')
+            if btn2.count() > 0:
+                btn2.first.click()
+                log("✅ Auto-klik button (text=Open)!", "S")
+                time.sleep(3)
+                return True
+            
+            # Try 3: Any link with "Open" text
+            btn3 = self.page.locator('a:has-text("Open")')
+            if btn3.count() > 0:
+                btn3.first.click()
+                log("✅ Auto-klik link (text=Open)!", "S")
+                time.sleep(3)
+                return True
+            
+            # Try 4: role=button with "Open"
+            btn4 = self.page.locator('[role="button"]:has-text("Open")')
+            if btn4.count() > 0:
+                btn4.first.click()
+                log("✅ Auto-klik role=button (text=Open)!", "S")
+                time.sleep(3)
+                return True
+            
+            # Try 5: Any element with "Open in Browser" text
+            btn5 = self.page.locator('text=Open in Browser')
+            if btn5.count() > 0:
+                btn5.first.click()
+                log("✅ Auto-klik 'Open in Browser'!", "S")
+                time.sleep(3)
+                return True
+                
         except Exception as e:
-            log(f"Open App button not found: {e}", "W")
+            log(f"Auto-click error: {e}", "W")
         return False
     
     def process_channel_ritual(self):
