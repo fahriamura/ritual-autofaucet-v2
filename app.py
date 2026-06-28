@@ -9,18 +9,44 @@ import os, sys, json, time, re, random, string, subprocess
 from datetime import datetime
 
 # ── Config ──────────────────────────────────────────────────────
+DISCORD_FILE = os.path.join(os.path.dirname(__file__), "discord.txt")
 ACCOUNTS_FILE = os.path.join(os.path.dirname(__file__), "accounts.json")
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 RPC = "https://rpc.ritualfoundation.org"
 RITUAL_WALLET = "0x532F0dF0896F353d8C3DD8cc134e8129DA2a3948"
 DISCORD_INVITE = "https://discord.gg/ritual-net"  # ganti dengan invite real
 
-# Load accounts
+# Load accounts — auto dari discord.txt!
 def load_accounts():
+    # Priority: accounts.json (manual) > discord.txt (auto)
+    if os.path.exists(DISCORD_FILE):
+        return parse_discord_txt(DISCORD_FILE)
     if os.path.exists(ACCOUNTS_FILE):
         with open(ACCOUNTS_FILE) as f:
             return json.load(f)
     return []
+
+def parse_discord_txt(path):
+    """Parse tab-separated discord.txt ke array JSON."""
+    accounts = []
+    with open(path) as f:
+        lines = f.readlines()
+    
+    for line in lines[1:]:  # skip header
+        parts = line.strip().split("\t")
+        if len(parts) >= 6:
+            accounts.append({
+                "email": parts[0].strip(),
+                "password": parts[1].strip(),
+                "username": parts[2].strip(),
+                "email_addr": parts[3].strip(),
+                "email_password": parts[4].strip(),
+                "email_link": parts[5].strip(),
+                "status": "pending",
+                "wallet": "",
+                "github": "",
+            })
+    return accounts
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -230,17 +256,38 @@ class AutoFaucet:
         # Step 4: Forward RIT ke main wallet
         wallet_addr = self.get_wallet_address(wallet_idx)
         main_wallet = config.get("main_wallet", "")
-        pk = ""
-        if wallet_idx < len(config.get("private_keys", [])):
-            pk = config["private_keys"][wallet_idx]
         
-        if pk and main_wallet:
+        # Cari private key dari ritual_wallets.txt
+        pk = ""
+        wallets_file = "/root/ritual_wallets.txt"
+        if os.path.exists(wallets_file):
+            with open(wallets_file) as f:
+                for line in f:
+                    if f"ritual_{wallet_idx + 1}=" in line or f"ritual_{wallet_idx+1}=" in line:
+                        pk = line.split("=", 1)[1].strip()
+                        break
+        
+        if pk and main_wallet and wallet_addr and wallet_addr != main_wallet:
             log(f"Forward RIT dari {wallet_addr} ke {main_wallet}", "I")
-            subprocess.run(
-                f'cast send {main_wallet} --value $(cast balance {wallet_addr} --rpc-url {RPC} --wei)wei '
-                f'--private-key {pk} --rpc-url {RPC} --gas-limit 21000 2>/dev/null',
-                shell=True, timeout=30
-            )
+            try:
+                bal = subprocess.run(
+                    f'cast balance {wallet_addr} --rpc-url {RPC} --ether 2>/dev/null',
+                    shell=True, capture_output=True, text=True, timeout=10
+                ).stdout.strip()
+                log(f"Balance {wallet_addr}: {bal} RIT", "I")
+                
+                if bal and float(bal) > 0.001:
+                    subprocess.run(
+                        f'PRIVATE_KEY={pk} cast send {main_wallet} '
+                        f'--value $(cast balance {wallet_addr} --rpc-url {RPC} --wei 2>/dev/null)wei '
+                        f'--private-key {pk} --rpc-url {RPC} --gas-limit 21000 2>/dev/null',
+                        shell=True, timeout=60
+                    )
+                    log(f"✅ Forward sukses ke {main_wallet}", "S")
+                else:
+                    log(f"Balance terlalu kecil ({bal} RIT), skip forward", "W")
+            except Exception as e:
+                log(f"Forward error: {e}", "E")
         
         # Update status
         account["status"] = "done"
@@ -249,38 +296,58 @@ class AutoFaucet:
         account["completed_at"] = datetime.now().isoformat()
         save_accounts(accounts)
         
+        log(f"✅ AKUN {idx+1} SELESAI! Wallet: {wallet_addr} | GitHub: {account['github']}", "S")
+        
         return True
     
     def run_all(self):
-        """Jalankan semua akun."""
+        """Jalankan semua akun auto-loop."""
+        global running
         if not accounts:
-            log("Tidak ada akun! Isi accounts.json dulu.", "E")
-            print(f"\nFormat accounts.json:")
-            print(json.dumps([
-                {"email": "user@op.pl", "password": "pass123", "username": "user1", "email_password": "emailpass", "status": "pending"}
-            ], indent=2))
+            log("Tidak ada akun! Cek discord.txt", "E")
+            log("Format discord.txt: Login\\tpassword\\tusername\\tEmail\\tEmail password\\tEmail link", "E")
             return
         
         log(f"Memproses {len(accounts)} akun...", "I")
         log("Browser TERBUKA — lo bisa liat semua yang terjadi!", "S")
+        log("Kalo ada captcha → klik MANUAL di browser", "H")
         log(f"{'='*60}")
         
         for i, acc in enumerate(accounts):
+            if not running:
+                log("⏹️ Dihentikan oleh user", "W")
+                break
+            
             if acc.get("status") == "done":
-                log(f"Akun {i} ({acc['email']}) sudah selesai, skip", "W")
+                log(f"Akun {i+1} ({acc['email']}) sudah selesai, skip", "W")
                 continue
             
-            log(f"\n▶️ Mulai akun {i+1}/{len(accounts)}", "I")
+            log(f"\n{'='*60}")
+            log(f"▶️ AKUN {i+1}/{len(accounts)}: {acc['email']}", "I")
+            log(f"{'='*60}")
+            
             success = self.run_account(i, acc)
             
             if success:
-                log(f"✅ Akun {i+1} selesai!", "S")
+                log(f"✅ Akun {i+1}/{len(accounts)} SELESAI!", "S")
             else:
-                log(f"❌ Akun {i+1} gagal — lanjut next", "E")
+                log(f"❌ Akun {i+1}/{len(accounts)} gagal — lanjut next", "E")
+                acc["status"] = "fail"
+                save_accounts(accounts)
             
-            if i < len(accounts) - 1:
-                log("Tunggu 10 detik sebelum akun berikutnya...", "I")
-                time.sleep(10)
+            # Lanjut next akun setelah delay
+            if i < len(accounts) - 1 and running:
+                delay = 15
+                log(f"⏳ Tunggu {delay} detik sebelum akun berikutnya...", "I")
+                for d in range(delay, 0, -1):
+                    if not running:
+                        break
+                    time.sleep(1)
+        
+        log(f"\n{'='*60}")
+        log("SEMUA SELESAI! 🎉", "S")
+        log(f"{'='*60}")
+        running = False
 
 
 # ── Web UI ──────────────────────────────────────────────────────
@@ -337,9 +404,9 @@ WEB_HTML = """<!DOCTYPE html>
 
     <div class="card">
         <h2>📋 Accounts</h2>
-        <p style="font-size:12px;color:#64748b;margin-bottom:8px">Format: [{ "email": "...", "password": "...", "username": "...", "email_password": "...", "status": "pending" }]</p>
-        <textarea id="accountsInput" placeholder="Paste accounts JSON"></textarea>
-        <button class="btn btn-primary" onclick="saveAccounts()">💾 Simpan Accounts</button>
+        <p style="font-size:12px;color:#64748b;margin-bottom:8px">✅ Auto-read dari <code>discord.txt</code> — {account_count} akun ditemukan</p>
+        <div id="accountsPreview" style="font-size:12px;color:#8892a8;font-family:monospace;margin-bottom:8px"></div>
+        <button class="btn btn-outline btn-sm" onclick="reloadAccounts()">🔄 Reload dari discord.txt</button>
         <span id="accountsStatus" style="font-size:12px;color:#64748b;margin-left:12px"></span>
     </div>
 
@@ -396,17 +463,12 @@ WEB_HTML = """<!DOCTYPE html>
         el.innerHTML = html;
     }
 
-    function saveAccounts() {
-        try {
-            const data = JSON.parse(document.getElementById('accountsInput').value);
-            fetch('/api/accounts', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
-            .then(r=>r.json()).then(d=>{
-                document.getElementById('accountsStatus').textContent = d.success ? '✅ Tersimpan' : '❌ Gagal';
-                renderTable(data);
-            });
-        } catch(e) {
-            document.getElementById('accountsStatus').textContent = '❌ JSON tidak valid';
-        }
+    function reloadAccounts() {
+        fetch('/api/reload-accounts', {method:'POST'})
+        .then(r=>r.json()).then(d=>{
+            document.getElementById('accountsStatus').textContent = d.success ? `✅ ${d.count} akun dimuat` : '❌ Gagal';
+            if(d.accounts) renderTable(d.accounts);
+        });
     }
 
     function saveConfig() {
@@ -452,7 +514,7 @@ thread = None
 
 @app.route("/")
 def index():
-    return render_template_string(WEB_HTML)
+    return render_template_string(WEB_HTML.format(account_count=len(accounts)))
 
 @app.route("/api/accounts", methods=["POST"])
 def api_accounts():
@@ -466,6 +528,12 @@ def api_accounts():
         save_accounts(accounts)
         return jsonify({"success": True, "count": len(accounts)})
     return jsonify({"success": False, "error": "Invalid format"})
+
+@app.route("/api/reload-accounts", methods=["POST"])
+def api_reload_accounts():
+    global accounts
+    accounts = load_accounts()
+    return jsonify({"success": True, "count": len(accounts), "accounts": accounts})
 
 @app.route("/api/config", methods=["POST"])
 def api_config():
