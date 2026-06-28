@@ -186,105 +186,296 @@ def process_one_account(page, idx, acc):
         time.sleep(0.5)
         page.locator('button[type="submit"]').click()
         log("Credentials submitted", "S")
-    except:
-        log("Cannot auto-fill login form", "W")
+    except Exception as e:
+        log(f"Cannot auto-fill login form: {e}", "W")
         ss(page, "01_error")
     
-    # Wait & check
-    for i in range(60):
+    # Wait & check what happened
+    for i in range(90):
         check_continue(page)
         time.sleep(1)
+        
+        # Check page text periodically
+        if i % 15 == 0:
+            body = page.evaluate("document.body.innerText")[:300].lower()
+            log(f"Page check ({i}s): {body[:150]}", "I")
+        
         if "/channels/" in page.url:
             log("Login SUCCESS! Redirected to channels ✅", "S")
             break
+        
         if "verify" in page.url.lower() or "mfa" in page.url.lower():
             log("MFA/Verification required", "H")
             ss(page, "01_verify")
             break
-    else:
-        ss(page, "01_after_wait")
-        log("Login status unclear — continuing", "W")
-    
-    # ── Check if verification needed ────────────────
-    body = page.evaluate("document.body.innerText").lower()
-    if "verify your email" in body or "new login location" in body or "check your email" in body:
-        log("IP verification detected! Opening email...", "I")
         
-        # Open email in new tab
+        if "new login" in page.evaluate("document.body.innerText").lower():
+            log("New login location detected! Need email verification", "H")
+            ss(page, "01_new_ip")
+            break
+        
+        if "captcha" in page.evaluate("document.body.innerText").lower():
+            log("CAPTCHA detected! Taking screenshot...", "H")
+            ss(page, "01_captcha")
+            break
+    else:
+        body = page.evaluate("document.body.innerText")[:500]
+        log(f"Login wait expired. Page: {page.url}", "W")
+        log(f"Page text: {body[:300]}", "I")
+        ss(page, "01_after_wait")
+    
+    # ── CHECK: is login page still showing? = verification needed ────
+    body = page.evaluate("document.body.innerText").lower()
+    still_on_login = ("email" in body and "password" in body and "/channels/" not in page.url)
+    
+    if still_on_login:
+        log("⚠️ Masih di halaman login — Discord minta verifikasi IP!", "H")
+        log("🔄 FLOW: onet.pl → verifikasi email → Discord → resend → onet.pl → Discord", "I")
+        
         ctx = page.context
         email_page = ctx.new_page()
-        email_page.goto(f"https://poczta.onet.pl/", wait_until="domcontentloaded")
+        
+        # ── STEP 3: Login onet.pl ──────────────────
+        log("STEP 3: Login onet.pl...", "I")
+        email_page.goto("https://poczta.onet.pl/", wait_until="domcontentloaded")
         time.sleep(5)
-        ss(email_page, "02_email_login")
+        ss(email_page, "02_onet_login")
         
-        # Login email
-        try:
-            # Onet.pl login
-            for sel in ['input[name="login"]', 'input[type="email"]', 'input[id*="email"]', 'input']:
-                try:
-                    el = email_page.locator(sel)
-                    if el.count() > 0:
-                        el.first.fill(email_addr)
-                        time.sleep(0.5)
-                        break
-                except: pass
-            
-            email_page.keyboard.press("Enter")
-            time.sleep(3)
-            
-            # Password
-            for sel in ['input[type="password"]', 'input[name="password"]', 'input[id*="pass"]']:
-                try:
-                    el = email_page.locator(sel)
-                    if el.count() > 0:
-                        el.first.fill(email_pw)
-                        time.sleep(0.5)
-                        break
-                except: pass
-            
-            # Submit
-            for sel in ['button[type="submit"]', 'button:has-text("Zaloguj")', 'button:has-text("Next")']:
-                try:
-                    el = email_page.locator(sel)
-                    if el.count() > 0:
-                        el.first.click()
-                        time.sleep(3)
-                        break
-                except: pass
-        except:
-            log("Cannot auto-login email — user needs to do it manually", "W")
-            ss(email_page, "02_email_manual")
-            time.sleep(30)
-        
-        # Find Discord verification email
-        log("Looking for Discord verification email...", "I")
-        click_text(email_page, "Powiadomienia") or click_text(email_page, "Discord")
-        time.sleep(2)
-        
-        # Click verification link
-        for sel in ['a:has-text("Verify")', 'a:has-text("Weryfikuj")', 'a[href*="discord"]']:
+        # Cari & klik "Poczta" / login button
+        for txt in ["Poczta", "Zaloguj", "Zaloguj się", "Log in"]:
             try:
-                el = email_page.locator(sel)
+                el = email_page.locator(f'text={txt}')
                 if el.count() > 0:
-                    href = el.first.get_attribute("href") or ""
-                    log(f"Clicking verify link: {href[:80]}", "C")
+                    el.first.click()
+                    time.sleep(3)
+                    log(f"Clicked {txt} on onet.pl", "C")
+                    break
+            except: pass
+        
+        # Isi email
+        for sel in ['input[name="login"]', 'input[type="email"]', 'input[id*="login"]', 
+                    'input[aria-label*="login"]', 'input', 'input[type="text"]']:
+            try:
+                el = email_page.locator(sel).first
+                if el.is_visible():
+                    el.fill(email_addr)
+                    log(f"Filled email: {email_addr}", "T")
+                    time.sleep(0.5)
+                    break
+            except: pass
+        
+        # Klik next / go to password
+        for txt in ["Dalej", "Next", "Kontynuuj", "Continue"]:
+            try:
+                el = email_page.locator(f'text={txt}')
+                if el.count() > 0:
+                    el.first.click()
+                    time.sleep(3)
+                    break
+            except: pass
+        
+        email_page.keyboard.press("Enter")
+        time.sleep(3)
+        
+        # Isi password
+        for sel in ['input[type="password"]', 'input[name="password"]', 'input[id*="pass"]',
+                    'input[aria-label*="hasło"]', 'input[aria-label*="password"]']:
+            try:
+                el = email_page.locator(sel).first
+                if el.is_visible():
+                    el.fill(email_pw)
+                    log("Filled password", "T")
+                    time.sleep(0.5)
+                    break
+            except: pass
+        
+        # Submit
+        for txt in ["Zaloguj", "Zaloguj się", "Sign in", "Log in"]:
+            try:
+                el = email_page.locator(f'text={txt}')
+                if el.count() > 0:
                     el.first.click()
                     time.sleep(5)
                     break
             except: pass
         
-        email_page.close()
-        time.sleep(2)
-        
-        # Back to Discord
-        page.goto("https://discord.com/login", wait_until="domcontentloaded")
+        email_page.keyboard.press("Enter")
         time.sleep(3)
+        ss(email_page, "02_onet_inbox")
+        
+        # ── STEP 4: Klik Powiadomienia ──────────────────
+        log("STEP 4: Klik Powiadomienia untuk cari email Discord...", "I")
+        
+        # User instruction: klik span dengan class go3592846988 / contain Powiadomienia
+        # Dan juga span dengan "Nowe: 2" / "New" badge
+        for selector in [
+            'span.go3592846988',
+            '[class*="Powiadomienia"]',
+            '[class*="side-menu-item"]',
+        ]:
+            try:
+                el = email_page.locator(selector)
+                if el.count() > 0 and el.first.is_visible():
+                    el.first.click()
+                    log(f"Clicked Powiadomienia via '{selector}'!", "C")
+                    time.sleep(3)
+                    break
+            except: pass
+        
+        # Fallback: click by text
+        if not click_text(email_page, "Powiadomienia"):
+            click_text(email_page, "Nieprzeczytane")
+            click_text(email_page, "Nowe:")
+            click_text(email_page, "Discord")
+        
+        time.sleep(3)
+        ss(email_page, "02_powiadomienia")
+        
+        # ── STEP 5: Klik verify link di email ──────
+        log("STEP 5: Klik link verifikasi Discord di email...", "I")
+        
+        # Cari & klik email dari Discord
+        for sel in ['text=Discord', 'text=discord', 'tr:has-text("Discord")',
+                    'a:has-text("Discord")', 'span:has-text("Discord")',
+                    'text=Weryfikacja', 'text=verification']:
+            try:
+                el = email_page.locator(sel)
+                if el.count() > 0:
+                    el.first.click()
+                    log(f"Clicked Discord email via '{sel}'", "C")
+                    time.sleep(3)
+                    break
+            except: pass
+        
+        ss(email_page, "02_discord_email")
+        
+        # Cari tombol verifikasi di isi email
+        # User instruction: <td bgcolor="#5865f2"> <a href="https://click.discord.com/...">
+        verify_clicked = False
+        for sel in [
+            'a[href*="click.discord.com"]',
+            'a[href*="discord.com/verify"]',
+            'a[href*="verify"]',
+            'a:has-text("Verify")',
+            'a:has-text("Weryfikuj")',
+            'td[bgcolor="#5865f2"] a',
+            'a:has-text("Verify Email")',
+        ]:
+            try:
+                el = email_page.locator(sel)
+                if el.count() > 0:
+                    href = el.first.get_attribute("href") or ""
+                    log(f"Clicking verify link: {href[:100]}", "C")
+                    el.first.click()
+                    time.sleep(5)
+                    verify_clicked = True
+                    break
+            except: pass
+        
+        if not verify_clicked:
+            log("⚠️ Verify link not found — cari manual", "W")
+            body_email = email_page.evaluate("document.body.innerText")
+            log(f"Email body: {body_email[:300]}", "I")
+        
+        # ── STEP 6: Back to Discord ────────────────
+        log("STEP 6: Kembali ke Discord (IP verified)...", "I")
+        email_page.close()
+        time.sleep(3)
+        
+        # Back to main page
+        page.goto("https://discord.com/login", wait_until="domcontentloaded")
+        time.sleep(5)
+        ss(page, "02_after_verify")
+        
+        # ── STEP 7-8: Resend + re-check email ──────
+        log("STEP 7: Re-login + resend verification...", "I")
+        
+        # Fill login again
         try:
             page.locator('input[name="email"]').fill(email)
+            time.sleep(0.3)
             page.locator('input[name="password"]').fill(pw)
+            time.sleep(0.3)
             page.locator('button[type="submit"]').click()
-            log("Re-logged in after verification", "S")
+            log("Re-submitted login", "S")
         except: pass
+        
+        # Wait 10s for redirect
+        for i in range(20):
+            check_continue(page)
+            time.sleep(0.5)
+            if "/channels/" in page.url:
+                log("Login SUCCESS after email verification ✅", "S")
+                return "ok"
+        
+        # Check if needing resend
+        body2 = page.evaluate("document.body.innerText").lower()
+        if "resend" in body2 or "verify your email" in body2:
+            log("Masih perlu resend verification — buka email lagi...", "H")
+            
+            # Klik resend di Discord
+            for txt in ["Resend", "Wyślij ponownie", "Send again"]:
+                try:
+                    el = page.locator(f'text={txt}')
+                    if el.count() > 0:
+                        el.first.click()
+                        log(f"Clicked {txt}", "C")
+                        time.sleep(5)
+                        break
+                except: pass
+            
+            # ── STEP 8: Buka onet.pl lagi, klik verif terbaru ──
+            email_page2 = ctx.new_page()
+            email_page2.goto("https://poczta.onet.pl/", wait_until="domcontentloaded")
+            time.sleep(5)
+            
+            # Auto-login (seharusnya sudah login via session)
+            # Cari Discord terbaru
+            for sel in ['text=Discord', 'tr:has-text("Discord")', 'a:has-text("Discord")']:
+                try:
+                    el = email_page2.locator(sel)
+                    if el.count() > 0:
+                        el.first.click()
+                        time.sleep(3)
+                        break
+                except: pass
+            
+            # Klik verify link lagi
+            for sel in ['a[href*="click.discord.com"]', 'a[href*="verify"]', 'a:has-text("Verify")']:
+                try:
+                    el = email_page2.locator(sel)
+                    if el.count() > 0:
+                        el.first.click()
+                        log("Clicked latest verify link", "C")
+                        time.sleep(5)
+                        break
+                except: pass
+            
+            email_page2.close()
+            time.sleep(3)
+            
+            # Re-login Discord
+            page.goto("https://discord.com/login", wait_until="domcontentloaded")
+            time.sleep(3)
+            try:
+                page.locator('input[name="email"]').fill(email)
+                page.locator('input[name="password"]').fill(pw)
+                page.locator('button[type="submit"]').click()
+            except: pass
+            
+            for i in range(30):
+                check_continue(page)
+                time.sleep(1)
+                if "/channels/" in page.url:
+                    log("Login SUCCESS after resend + verify ✅", "S")
+                    return "ok"
+        
+        # Default: login failed
+        log(f"❌ Login gagal setelah verifikasi. Page: {page.url}", "E")
+        body_final = page.evaluate("document.body.innerText")[:400]
+        log(f"Page final: {body_final[:200]}", "I")
+        ss(page, "02_login_failed")
+        return "fail"
     
     # Wait for fresh login to fully load
     for i in range(30):
@@ -474,7 +665,7 @@ def main():
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
     page = context.new_page()
-    page.set_default_timeout(30000)
+    page.set_default_timeout(15000)  # 15s default timeout
     
     try:
         for idx, acc in enumerate(accounts):
