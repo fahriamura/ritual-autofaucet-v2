@@ -1,0 +1,527 @@
+#!/usr/bin/env python3
+"""
+Ritual AutoFaucet — Visible Browser Edition
+- Chromium terbuka, lo bisa liat & klik captcha manual
+- Sisanya (login, create wallet, input, dll) otomatis
+"""
+
+import os, sys, json, time, re, random, string, subprocess
+from datetime import datetime
+
+# ── Config ──────────────────────────────────────────────────────
+ACCOUNTS_FILE = os.path.join(os.path.dirname(__file__), "accounts.json")
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+RPC = "https://rpc.ritualfoundation.org"
+RITUAL_WALLET = "0x532F0dF0896F353d8C3DD8cc134e8129DA2a3948"
+DISCORD_INVITE = "https://discord.gg/ritual-net"  # ganti dengan invite real
+
+# Load accounts
+def load_accounts():
+    if os.path.exists(ACCOUNTS_FILE):
+        with open(ACCOUNTS_FILE) as f:
+            return json.load(f)
+    return []
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    return {"main_wallet": "", "private_keys": []}
+
+def save_accounts(accounts):
+    with open(ACCOUNTS_FILE, "w") as f:
+        json.dump(accounts, f, indent=2)
+
+def save_config(cfg):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+accounts = load_accounts()
+config = load_config()
+
+# ── Random Generator ────────────────────────────────────────────
+def random_name(length=8):
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+
+def random_github():
+    adj = ['cool', 'nice', 'super', 'mega', 'epic', 'neo', 'zen', 'cyber', 'quantum', 'astro']
+    noun = ['dev', 'coder', 'hacker', 'agent', 'runner', 'node', 'link', 'wave', 'flux', 'pulse']
+    return f"{random.choice(adj)}-{random.choice(noun)}-{random_name(4)}"
+
+# ── Playwright ──────────────────────────────────────────────────
+from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
+
+def log(msg, type="I"):
+    prefix = {"I": "ℹ️", "S": "✅", "W": "⚠️", "E": "❌", "H": "🔶"}
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {prefix.get(type,'ℹ️')} {msg}", flush=True)
+
+def wait_for_user(page, msg, timeout=300000):
+    """Tampilkan pesan & tunggu user interaksi/klik manual."""
+    log(f"{msg} — ( klik manual, menunggu {timeout//1000}s )", "H")
+    try:
+        page.wait_for_timeout(timeout)
+    except:
+        pass
+
+class AutoFaucet:
+    def __init__(self):
+        self.pw = sync_playwright().start()
+        # Launch VISIBLE browser
+        self.browser = self.pw.chromium.launch(
+            headless=False,
+            args=[
+                '--start-maximized',
+                '--disable-blink-features=AutomationControlled',
+                '--no-sandbox',
+            ]
+        )
+        self.context = self.browser.new_context(
+            no_viewport=True,
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        self.page = self.context.new_page()
+        self.page.set_default_timeout(30000)
+        log("Browser terbuka — lo bisa liat & interaksi!", "S")
+    
+    def close(self):
+        try:
+            self.browser.close()
+            self.pw.stop()
+        except:
+            pass
+    
+    def discord_login(self, email, password):
+        """Login ke Discord — captcha manual."""
+        log(f"🔄 Buka Discord login...")
+        self.page.goto("https://discord.com/login", wait_until="domcontentloaded")
+        wait_for_user(self.page, "Tunggu halaman Discord load", 5000)
+        
+        # Isi email
+        email_input = self.page.locator('input[name="email"]')
+        email_input.fill(email)
+        time.sleep(0.5)
+        
+        # Isi password
+        pass_input = self.page.locator('input[name="password"]')
+        pass_input.fill(password)
+        time.sleep(0.5)
+        
+        # Klik login
+        login_btn = self.page.locator('button[type="submit"]')
+        login_btn.click()
+        
+        log("🔶 Kalo ada captcha/hCaptcha — klik MANUAL sekarang!", "H")
+        log("⏳ Menunggu 120 detik biar lo solve captcha...", "H")
+        
+        # Tunggu user solve captcha
+        try:
+            self.page.wait_for_url("**/channels/**", timeout=120000)
+            log("Login sukses! Captcha solved ✅", "S")
+            return True
+        except PwTimeout:
+            # Cek apakah masih di halaman login
+            if "login" in self.page.url.lower():
+                log("Login gagal / captcha gak solved dalam 120s", "E")
+                return False
+            log("Mungkin udah login (URL berubah)", "S")
+            return True
+    
+    def join_server(self, invite_url):
+        """Join Discord server."""
+        log(f"🔄 Join server: {invite_url}")
+        self.page.goto(invite_url, wait_until="domcontentloaded")
+        time.sleep(3)
+        
+        try:
+            accept_btn = self.page.locator('button:has-text("Accept Invite")')
+            if accept_btn.count() > 0:
+                accept_btn.click()
+                time.sleep(2)
+        except:
+            pass
+        
+        wait_for_user(self.page, "Kalo ada verification captcha — solve manual", 60000)
+        log("Join server step selesai", "S")
+    
+    def get_wallet_address(self, wallet_index):
+        """Generate wallet address dari ritual_wallets.txt atau buat baru."""
+        # Coba baca dari ritual_wallets.txt
+        wallets_file = "/root/ritual_wallets.txt"
+        wallets = []
+        if os.path.exists(wallets_file):
+            with open(wallets_file) as f:
+                content = f.read()
+            # Parse wallet addresses
+            matches = re.findall(r'ritual_\d+=(\S+)', content)
+            wallets = matches
+        
+        if wallet_index < len(wallets):
+            return wallets[wallet_index]
+        
+        # Buat wallet baru via cast
+        try:
+            result = subprocess.run(
+                f"cast wallet new --rpc-url {RPC} 2>/dev/null",
+                shell=True, capture_output=True, text=True, timeout=10
+            )
+            for line in result.stdout.split('\n'):
+                if 'Address:' in line:
+                    return line.split('Address:')[1].strip()
+        except:
+            pass
+        
+        return f"0x{random_name(40)}"  # fallback dummy
+    
+    def process_channel_ritual(self):
+        """Proses channel Ritual Discord:
+        - /get-code
+        - input wallet
+        - input github
+        - claim faucet
+        """
+        log("🔄 Proses channel Ritual...", "I")
+        
+        # Cari channel verification
+        wait_for_user(self.page, "Navigasi MANUAL ke channel verification & solve captcha", 120000)
+        log("Verification done (asumsi)", "S")
+        
+        # Ke channel academy-welcome
+        wait_for_user(self.page, "Navigasi MANUAL ke #academy-welcome & klik link wallet", 60000)
+        log("Wallet link clicked (asumsi)", "S")
+        
+        # Ke channel rank, ketik /get-code
+        wait_for_user(self.page, "Navigasi MANUAL ke #rank & ketik /get-code", 60000)
+        log("get-code done (asumsi)", "S")
+        
+        # Ikutin perintah bot untuk faucet
+        wait_for_user(self.page, "Ikutin perintah bot & claim faucet MANUAL", 120000)
+        log("Faucet claim done (asumsi)", "S")
+        
+        # Ke genesis-link, input wallet
+        wait_for_user(self.page, "Navigasi MANUAL ke #genesis-link & verifikasi wallet", 60000)
+        log("Genesis link done (asumsi)", "S")
+        
+        return True
+    
+    def run_account(self, idx, account):
+        """Proses 1 akun Discord."""
+        email = account.get("email", "")
+        password = account.get("password", "")
+        username = account.get("username", "")
+        email_pass = account.get("email_password", "")
+        wallet_idx = idx + 1  # ritual_2, ritual_3, dll
+        
+        log(f"{'='*60}")
+        log(f"AKUN [{idx}]: {email} ({username})", "S")
+        log(f"WALLET: ritual_{wallet_idx + 1}", "S")
+        log(f"{'='*60}")
+        
+        # Step 1: Login Discord
+        if not self.discord_login(email, password):
+            log(f"Skip akun {email} — login gagal", "E")
+            return False
+        
+        # Step 2: Join server
+        self.join_server(DISCORD_INVITE)
+        
+        # Step 3: Process channels
+        self.process_channel_ritual()
+        
+        # Step 4: Forward RIT ke main wallet
+        wallet_addr = self.get_wallet_address(wallet_idx)
+        main_wallet = config.get("main_wallet", "")
+        pk = ""
+        if wallet_idx < len(config.get("private_keys", [])):
+            pk = config["private_keys"][wallet_idx]
+        
+        if pk and main_wallet:
+            log(f"Forward RIT dari {wallet_addr} ke {main_wallet}", "I")
+            subprocess.run(
+                f'cast send {main_wallet} --value $(cast balance {wallet_addr} --rpc-url {RPC} --wei)wei '
+                f'--private-key {pk} --rpc-url {RPC} --gas-limit 21000 2>/dev/null',
+                shell=True, timeout=30
+            )
+        
+        # Update status
+        account["status"] = "done"
+        account["wallet"] = wallet_addr
+        account["github"] = random_github()
+        account["completed_at"] = datetime.now().isoformat()
+        save_accounts(accounts)
+        
+        return True
+    
+    def run_all(self):
+        """Jalankan semua akun."""
+        if not accounts:
+            log("Tidak ada akun! Isi accounts.json dulu.", "E")
+            print(f"\nFormat accounts.json:")
+            print(json.dumps([
+                {"email": "user@op.pl", "password": "pass123", "username": "user1", "email_password": "emailpass", "status": "pending"}
+            ], indent=2))
+            return
+        
+        log(f"Memproses {len(accounts)} akun...", "I")
+        log("Browser TERBUKA — lo bisa liat semua yang terjadi!", "S")
+        log(f"{'='*60}")
+        
+        for i, acc in enumerate(accounts):
+            if acc.get("status") == "done":
+                log(f"Akun {i} ({acc['email']}) sudah selesai, skip", "W")
+                continue
+            
+            log(f"\n▶️ Mulai akun {i+1}/{len(accounts)}", "I")
+            success = self.run_account(i, acc)
+            
+            if success:
+                log(f"✅ Akun {i+1} selesai!", "S")
+            else:
+                log(f"❌ Akun {i+1} gagal — lanjut next", "E")
+            
+            if i < len(accounts) - 1:
+                log("Tunggu 10 detik sebelum akun berikutnya...", "I")
+                time.sleep(10)
+
+
+# ── Web UI ──────────────────────────────────────────────────────
+from flask import Flask, render_template_string, jsonify, request
+import threading
+
+WEB_HTML = """<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <title>Ritual AutoFaucet — Visible Browser</title>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0e17;color:#e0e6f0;padding:24px}
+        .container{max-width:800px;margin:0 auto}
+        h1{background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-size:28px;margin-bottom:8px}
+        .sub{color:#8892a8;font-size:14px;margin-bottom:24px}
+        .card{background:#111827;border:1px solid #1e293b;border-radius:16px;padding:20px;margin-bottom:16px}
+        .card h2{font-size:15px;color:#94a3b8;margin-bottom:12px;font-weight:600}
+        label{display:block;font-size:13px;color:#94a3b8;margin-bottom:4px;margin-top:12px}
+        input,textarea{width:100%;padding:10px;background:#1a2332;border:1px solid #2d3a4e;border-radius:10px;color:#e0e6f0;font-size:13px;font-family:monospace;outline:none}
+        input:focus{border-color:#60a5fa}
+        textarea{min-height:200px;resize:vertical}
+        .btn{display:inline-flex;align-items:center;gap:8px;padding:10px 24px;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;transition:.2s;margin-top:12px}
+        .btn-primary{background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff}
+        .btn-primary:hover{transform:translateY(-1px);box-shadow:0 4px 20px rgba(59,130,246,0.3)}
+        .btn-success{background:linear-gradient(135deg,#10b981,#059669);color:#fff}
+        .btn-success:hover{transform:translateY(-1px);box-shadow:0 4px 20px rgba(16,185,129,0.3)}
+        .btn-danger{background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff}
+        .btn:disabled{opacity:0.5;cursor:not-allowed}
+        .log-box{background:#0d1117;border:1px solid #1e293b;border-radius:10px;padding:14px;font-family:monospace;font-size:12px;line-height:1.6;max-height:400px;overflow-y:auto;margin-top:12px;white-space:pre-wrap}
+        .log-info{color:#60a5fa}
+        .log-success{color:#34d399}
+        .log-error{color:#f87171}
+        .log-warn{color:#fbbf24}
+        .log-highlight{color:#f59e0b}
+        .status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+        .dot-green{background:#34d399}
+        .dot-red{background:#f87171}
+        .dot-yellow{background:#fbbf24}
+        table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
+        th,td{padding:8px 12px;text-align:left;border-bottom:1px solid #1e293b}
+        th{color:#64748b;font-weight:500}
+        .badge{padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600}
+        .badge-done{background:#065f46;color:#34d399}
+        .badge-pending{background:#1e3a5f;color:#60a5fa}
+        .badge-fail{background:#5f1e1e;color:#f87171}
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>🌊 Ritual AutoFaucet</h1>
+    <p class="sub">Visible Chromium — lo klik captcha manual, sisanya otomatis</p>
+
+    <div class="card">
+        <h2>📋 Accounts</h2>
+        <p style="font-size:12px;color:#64748b;margin-bottom:8px">Format: [{ "email": "...", "password": "...", "username": "...", "email_password": "...", "status": "pending" }]</p>
+        <textarea id="accountsInput" placeholder="Paste accounts JSON"></textarea>
+        <button class="btn btn-primary" onclick="saveAccounts()">💾 Simpan Accounts</button>
+        <span id="accountsStatus" style="font-size:12px;color:#64748b;margin-left:12px"></span>
+    </div>
+
+    <div class="card">
+        <h2>⚙️ Config</h2>
+        <label>Main Wallet (tujuan forward RIT)</label>
+        <input id="mainWallet" placeholder="0x...">
+        <label>Private Key(s) — pisah koma</label>
+        <input id="privateKeys" placeholder="0x...,0x...,0x...">
+        <button class="btn btn-primary" onclick="saveConfig()">💾 Simpan Config</button>
+        <span id="configStatus" style="font-size:12px;color:#64748b;margin-left:12px"></span>
+    </div>
+
+    <div class="card">
+        <h2>▶️ Control</h2>
+        <button class="btn btn-success" onclick="startFaucet()">🚀 Start AutoFaucet</button>
+        <button class="btn btn-danger" onclick="stopFaucet()" disabled id="stopBtn">⏹️ Stop</button>
+        <div class="log-box" id="logBox">⏳ Belum mulai...</div>
+    </div>
+
+    <div class="card">
+        <h2>📊 Status Akun</h2>
+        <div id="statusTable"><p style="color:#64748b;font-size:13px">Belum ada data</p></div>
+    </div>
+</div>
+<script>
+    let ws = null;
+
+    function connectWS() {
+        ws = new WebSocket('ws://' + location.host + '/ws');
+        ws.onmessage = e => {
+            const data = JSON.parse(e.data);
+            if(data.type === 'log') document.getElementById('logBox').innerHTML += data.msg + '\\n';
+            if(data.type === 'accounts') renderTable(data.data);
+        };
+        ws.onclose = () => setTimeout(connectWS, 1000);
+    }
+
+    function renderTable(accounts) {
+        const el = document.getElementById('statusTable');
+        if(!accounts || accounts.length === 0) {
+            el.innerHTML = '<p style="color:#64748b;font-size:13px">Belum ada data</p>';
+            return;
+        }
+        let html = '<table><tr><th>#</th><th>Email</th><th>Status</th><th>Wallet</th><th>GitHub</th></tr>';
+        accounts.forEach((a,i) => {
+            const badge = a.status === 'done' ? 'badge-done' : a.status === 'fail' ? 'badge-fail' : 'badge-pending';
+            html += `<tr><td>${i+1}</td><td>${a.email||'?'}</td>
+                <td><span class="badge ${badge}">${a.status||'pending'}</span></td>
+                <td style="font-family:monospace;font-size:11px">${(a.wallet||'').slice(0,10)}...</td>
+                <td style="font-size:11px">${a.github||'-'}</td></tr>`;
+        });
+        html += '</table>';
+        el.innerHTML = html;
+    }
+
+    function saveAccounts() {
+        try {
+            const data = JSON.parse(document.getElementById('accountsInput').value);
+            fetch('/api/accounts', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
+            .then(r=>r.json()).then(d=>{
+                document.getElementById('accountsStatus').textContent = d.success ? '✅ Tersimpan' : '❌ Gagal';
+                renderTable(data);
+            });
+        } catch(e) {
+            document.getElementById('accountsStatus').textContent = '❌ JSON tidak valid';
+        }
+    }
+
+    function saveConfig() {
+        const data = {
+            main_wallet: document.getElementById('mainWallet').value,
+            private_keys: document.getElementById('privateKeys').value.split(',').map(s=>s.trim()).filter(Boolean)
+        };
+        fetch('/api/config', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
+        .then(r=>r.json()).then(d=>{
+            document.getElementById('configStatus').textContent = d.success ? '✅ Tersimpan' : '❌ Gagal';
+        });
+    }
+
+    function startFaucet() {
+        document.getElementById('logBox').innerHTML = '🚀 Memulai...\\n';
+        document.querySelector('#stopBtn').disabled = false;
+        fetch('/api/start', {method:'POST'});
+    }
+
+    function stopFaucet() {
+        fetch('/api/stop', {method:'POST'});
+        document.querySelector('#stopBtn').disabled = true;
+    }
+
+    // Load existing data
+    fetch('/api/status').then(r=>r.json()).then(d=>{
+        if(d.accounts) renderTable(d.accounts);
+        if(d.config) {
+            document.getElementById('mainWallet').value = d.config.main_wallet || '';
+            document.getElementById('privateKeys').value = (d.config.private_keys||[]).join(',');
+        }
+    });
+
+    connectWS();
+</script>
+</body>
+</html>"""
+
+# ── Flask ───────────────────────────────────────────────────────
+app = Flask(__name__)
+running = False
+thread = None
+
+@app.route("/")
+def index():
+    return render_template_string(WEB_HTML)
+
+@app.route("/api/accounts", methods=["POST"])
+def api_accounts():
+    global accounts
+    data = request.json
+    if isinstance(data, list):
+        for acc in data:
+            if "status" not in acc:
+                acc["status"] = "pending"
+        accounts = data
+        save_accounts(accounts)
+        return jsonify({"success": True, "count": len(accounts)})
+    return jsonify({"success": False, "error": "Invalid format"})
+
+@app.route("/api/config", methods=["POST"])
+def api_config():
+    global config
+    data = request.json
+    config["main_wallet"] = data.get("main_wallet", "")
+    config["private_keys"] = data.get("private_keys", [])
+    save_config(config)
+    return jsonify({"success": True})
+
+@app.route("/api/status")
+def api_status():
+    return jsonify({
+        "running": running,
+        "accounts": accounts,
+        "config": config
+    })
+
+@app.route("/api/start", methods=["POST"])
+def api_start():
+    global running, thread
+    if running:
+        return jsonify({"error": "Already running"})
+    running = True
+    thread = threading.Thread(target=run_faucet, daemon=True)
+    thread.start()
+    return jsonify({"success": True})
+
+@app.route("/api/stop", methods=["POST"])
+def api_stop():
+    global running
+    running = False
+    return jsonify({"success": True})
+
+def run_faucet():
+    global running
+    af = AutoFaucet()
+    try:
+        af.run_all()
+    except Exception as e:
+        log(f"Fatal error: {e}", "E")
+    finally:
+        af.close()
+        running = False
+
+# ── Main ────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    print(f"""
+╔══════════════════════════════════════════╗
+║   🌊 Ritual AutoFaucet — Visible Browser ║
+║                                          ║
+║   Buka → http://localhost:5000           ║
+║                                          ║
+║   Chromium akan TERBUKA (nggak headless) ║
+║   Lo tinggal klik captcha manual         ║
+║   Sisanya auto: login, wallet, input     ║
+╚══════════════════════════════════════════╝
+    """)
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
