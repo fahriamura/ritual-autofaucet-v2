@@ -272,15 +272,12 @@ class Handler(BaseHTTPRequestHandler):
 # ============================================================
 # Main
 # ============================================================
-class ThreadedHTTPServer(HTTPServer):
-    """Handle requests in separate threads"""
+from socketserver import ThreadingMixIn
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Handle requests in separate threads (built-in ThreadingMixIn)"""
     allow_reuse_address = True
-    
-    def process_request(self, request, client_address):
-        t = threading.Thread(target=self.process_request_thread,
-                           args=(request, client_address))
-        t.daemon = True
-        t.start()
+    daemon_threads = True
 
 if __name__ == "__main__":
     port = int(os.getenv("API_PORT", "5001"))
