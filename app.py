@@ -52,7 +52,7 @@ def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE) as f:
             return json.load(f)
-    return {"main_wallet": "", "private_keys": []}
+    return {"main_wallet": ""}
 
 def save_accounts(accounts):
     with open(ACCOUNTS_FILE, "w") as f:
@@ -351,7 +351,7 @@ class AutoFaucet:
 
 
 # ── Web UI ──────────────────────────────────────────────────────
-from flask import Flask, render_template_string, jsonify, request
+from flask import Flask, jsonify, request
 import threading
 
 WEB_HTML = """<!DOCTYPE html>
@@ -412,10 +412,12 @@ WEB_HTML = """<!DOCTYPE html>
 
     <div class="card">
         <h2>⚙️ Config</h2>
-        <label>Main Wallet (tujuan forward RIT)</label>
+        <div style="background:#1a2332;border-radius:10px;padding:14px;margin-bottom:14px;font-size:13px">
+            <p style="color:#34d399;font-weight:600">✅ Wallet otomatis dibuat dari ritual_wallets.txt</p>
+            <p style="color:#64748b;margin-top:4px">Accounts: <span id="walletCount" style="color:#60a5fa">0</span> wallet tersedia</p>
+        </div>
+        <label>🏦 Main Wallet (tujuan forward RIT)</label>
         <input id="mainWallet" placeholder="0x...">
-        <label>Private Key(s) — pisah koma</label>
-        <input id="privateKeys" placeholder="0x...,0x...,0x...">
         <button class="btn btn-primary" onclick="saveConfig()">💾 Simpan Config</button>
         <span id="configStatus" style="font-size:12px;color:#64748b;margin-left:12px"></span>
     </div>
@@ -473,8 +475,7 @@ WEB_HTML = """<!DOCTYPE html>
 
     function saveConfig() {
         const data = {
-            main_wallet: document.getElementById('mainWallet').value,
-            private_keys: document.getElementById('privateKeys').value.split(',').map(s=>s.trim()).filter(Boolean)
+            main_wallet: document.getElementById('mainWallet').value
         };
         fetch('/api/config', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
         .then(r=>r.json()).then(d=>{
@@ -498,7 +499,6 @@ WEB_HTML = """<!DOCTYPE html>
         if(d.accounts) renderTable(d.accounts);
         if(d.config) {
             document.getElementById('mainWallet').value = d.config.main_wallet || '';
-            document.getElementById('privateKeys').value = (d.config.private_keys||[]).join(',');
         }
     });
 
@@ -541,7 +541,6 @@ def api_config():
     global config
     data = request.json
     config["main_wallet"] = data.get("main_wallet", "")
-    config["private_keys"] = data.get("private_keys", [])
     save_config(config)
     return jsonify({"success": True})
 
