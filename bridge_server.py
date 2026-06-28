@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-bridge_server.py — TCP server (port 5099)
-Windows bridge connects here. I send commands via /tmp/bridge_cmd
+bridge_server.py — relay antara Windows bridge (port 5099) dan gue (port 5098)
+Windows ↔ port 5099 → relay → port 5098 ↔ gue (curl / socket)
 """
-import socket, threading, time, os, json
+import socket, threading, json, sys
 
-BRIDGE = None  # single bridge connection
+BRIDGE = None
+lock = threading.Lock()
 
-def handle(conn):
+def handle_bridge(conn):
+    """Windows bridge connects here"""
     global BRIDGE
-    BRIDGE = conn
+    with lock:
+        BRIDGE = conn
     print("BRIDGE CONNECTED!", flush=True)
     
-    # Read responses from bridge
-    try:
-        buf = b""
-        while True:
+    buf = b""
+    while True:
+        try:
             data = conn.recv(4096)
             if not data: break
             buf += data
@@ -24,46 +26,74 @@ def handle(conn):
                 try:
                     r = json.loads(line.decode())
                     print(f"RESULT: {json.dumps(r)[:200]}", flush=True)
-                except:
-                    pass
-    except:
-        pass
-    finally:
-        print("BRIDGE DISCONNECTED", flush=True)
+                    # Store last result
+                    with lock:
+                        LAST_RESULT["data"] = r
+                except: pass
+        except: break
+    
+    with lock:
         BRIDGE = None
-        conn.close()
+    print("BRIDGE DISCONNECTED", flush=True)
 
-def send(cmd):
-    if BRIDGE:
-        try:
-            BRIDGE.sendall((json.dumps(cmd) + "\n").encode())
-            return True
-        except:
-            BRIDGE = None
-    return False
-
-def cmd_reader():
-    """Read commands from /tmp/bridge_cmd"""
+def handle_cmd(conn):
+    """Gue connects here (port 5098) — send cmd, get result"""
+    buf = b""
     while True:
         try:
-            with open("/tmp/bridge_cmd", "r") as f:
-                line = f.readline().strip()
-            if line:
-                os.truncate("/tmp/bridge_cmd", 0)  # Hanya Python 3.7+
-                cmd = json.loads(line) if line.startswith("{") else {"action": line}
-                send(cmd)
-        except: pass
-        time.sleep(0.5)
+            data = conn.recv(4096)
+            if not data: break
+            buf += data
+            if b"\n" in buf:
+                cmd_line, buf = buf.split(b"\n", 1)
+                cmd = json.loads(cmd_line.decode())
+                
+                with lock:
+                    if not BRIDGE:
+                        conn.sendall(json.dumps({"ok": False, "error": "bridge disconnected"}).encode() + b"\n")
+                        continue
+                    # Forward to Windows bridge
+                    try:
+                        BRIDGE.sendall((json.dumps(cmd) + "\n").encode())
+                    except:
+                        conn.sendall(json.dumps({"ok": False, "error": "send failed"}).encode() + b"\n")
+                        continue
+                
+                # Wait for response
+                # Note: handle_bridge stores in LAST_RESULT
+                import time
+                time.sleep(2)
+                
+                with lock:
+                    result = LAST_RESULT.get("data", {"ok": True, "status": "sent"})
+                    LAST_RESULT["data"] = None
+                
+                conn.sendall((json.dumps(result) + "\n").encode())
+        except: break
+    conn.close()
 
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server.bind(("0.0.0.0", 5099))
-server.listen(1)
-print(f"BRIDGE SERVER listening on :5099", flush=True)
+LAST_RESULT = {"data": None}
 
-threading.Thread(target=cmd_reader, daemon=True).start()
+# Start servers
+server_b = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server_b.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server_b.bind(("0.0.0.0", 5099))
+server_b.listen(1)
 
+server_c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server_c.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server_c.bind(("0.0.0.0", 5098))
+server_c.listen(1)
+
+print("BRIDGE SERVER: Windows port 5099 | CMD port 5098", flush=True)
+
+# Accept bridge connection
+b_conn, b_addr = server_b.accept()
+print(f"Bridge from {b_addr}", flush=True)
+threading.Thread(target=handle_bridge, args=(b_conn,), daemon=True).start()
+
+# Accept cmd connections
 while True:
-    conn, addr = server.accept()
-    print(f"Connection from {addr}", flush=True)
-    threading.Thread(target=handle, args=(conn,), daemon=True).start()
+    c_conn, c_addr = server_c.accept()
+    print(f"CMD from {c_addr}", flush=True)
+    threading.Thread(target=handle_cmd, args=(c_conn,), daemon=True).start()
