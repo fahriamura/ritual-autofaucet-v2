@@ -89,9 +89,12 @@ def wait_for_user(page, msg, timeout=300000):
         for _ in range(timeout // 2000):
             # Cek Open in Browser button tiap 2 detik
             try:
+                # Semua selector Open/Continue in Browser
                 for sel in ['.buttonChildrenWrapper_a22cb0', 'button:has-text("Open")', 
                            'a:has-text("Open")', '[role="button"]:has-text("Open")',
-                           'text=Open in Browser']:
+                           'text=Open in Browser',
+                           'span.lineClamp1__4bd52:has-text("Continue in Browser")',
+                           'text=Continue in Browser']:
                     el = page.locator(sel)
                     if el.count() > 0:
                         el.first.click()
@@ -261,6 +264,22 @@ class AutoFaucet:
             if btn5.count() > 0:
                 btn5.first.click()
                 log("✅ Auto-klik 'Open in Browser'!", "S")
+                time.sleep(3)
+                return True
+            
+            # Try 6: span dengan class lineClamp1 + "Continue in Browser"
+            btn6 = self.page.locator('span.lineClamp1__4bd52:has-text("Continue in Browser")')
+            if btn6.count() > 0:
+                btn6.first.click()
+                log("✅ Auto-klik 'Continue in Browser' (span)!", "S")
+                time.sleep(3)
+                return True
+            
+            # Try 7: Any element with "Continue in Browser" text
+            btn7 = self.page.locator('text=Continue in Browser')
+            if btn7.count() > 0:
+                btn7.first.click()
+                log("✅ Auto-klik 'Continue in Browser' (text)!", "S")
                 time.sleep(3)
                 return True
                 
