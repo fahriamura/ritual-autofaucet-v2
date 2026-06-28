@@ -1,42 +1,50 @@
 #!/usr/bin/env python3
 """
-bridge.py — Connect ke server, terima JSON commands, jalanin di browser
+bridge.py — Persistent bridge: auto-reconnect + restart_browser
 Windows: python bridge.py 76.13.18.146 5099
+Jalan SEKALI — reconnect otomatis, browser restart dari server.
 """
 import asyncio, json, base64, time, sys
 from playwright.async_api import async_playwright
 
 SERVER_HOST = sys.argv[1] if len(sys.argv) > 1 else "76.13.18.146"
 SERVER_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 5099
-page = None
-browser = None
 
-async def main():
-    global page, browser
-    
-    pw = await async_playwright().start()
+async def launch_browser(pw):
+    """Launch fresh browser + page"""
     browser = await pw.chromium.launch(
         headless=False,
         args=['--start-maximized', '--disable-blink-features=AutomationControlled']
     )
     page = await browser.new_page()
-    
-    print(f"Browser ready — connecting to {SERVER_HOST}:{SERVER_PORT}", flush=True)
-    
-    # Connect to server
-    reader, writer = await asyncio.open_connection(SERVER_HOST, SERVER_PORT)
-    print(f"Connected! Waiting for commands...", flush=True)
-    
+    return browser, page
+
+async def handle_commands(reader, writer, state, pw):
+    """Process commands from server. Returns 'restart' if browser restart requested.
+    state = {'page': ..., 'browser': ...}  — mutable for restart propagation."""
+    page = state['page']
+    browser = state['browser']
     while True:
         try:
-            line = await asyncio.wait_for(reader.readline(), timeout=60)
+            line = await asyncio.wait_for(reader.readline(), timeout=120)
             if not line:
-                break
+                return "disconnect"
             cmd = json.loads(line.decode().strip())
             action = cmd.get("action", "")
             result = {"ok": True}
             
-            if action == "screenshot":
+            if action == "restart_browser":
+                # Close current browser, launch new one
+                await browser.close()
+                new_browser, new_page = await launch_browser(pw)
+                state['browser'] = new_browser
+                state['page'] = new_page
+                page = new_page
+                browser = new_browser
+                result["restarted"] = True
+                result["msg"] = "Browser restarted fresh"
+            
+            elif action == "screenshot":
                 b = await page.screenshot(full_page=False)
                 result["image_base64"] = base64.b64encode(b).decode()
                 result["size"] = len(b)
@@ -106,11 +114,35 @@ async def main():
         except asyncio.TimeoutError:
             continue
         except Exception as e:
-            writer.write((json.dumps({"ok": False, "error": str(e)}) + "\n").encode())
-            await writer.drain()
+            try:
+                writer.write((json.dumps({"ok": False, "error": str(e)}) + "\n").encode())
+                await writer.drain()
+            except:
+                return "disconnect"
+
+async def main():
+    pw = await async_playwright().start()
+    browser, page = await launch_browser(pw)
+    state = {'browser': browser, 'page': page}
     
-    writer.close()
-    await browser.close()
-    await pw.stop()
+    print(f"Browser ready — connecting to {SERVER_HOST}:{SERVER_PORT}", flush=True)
+    
+    while True:
+        try:
+            reader, writer = await asyncio.open_connection(SERVER_HOST, SERVER_PORT)
+            print(f"Connected! Waiting for commands...", flush=True)
+            
+            result = await handle_commands(reader, writer, state, pw)
+            
+            writer.close()
+            if result == "restart":
+                print("Browser restarted, reconnecting...", flush=True)
+            else:
+                print(f"Disconnected ({result}), reconnecting in 3s...", flush=True)
+                await asyncio.sleep(3)
+                
+        except Exception as e:
+            print(f"Connection failed: {e}, retrying in 3s...", flush=True)
+            await asyncio.sleep(3)
 
 asyncio.run(main())
