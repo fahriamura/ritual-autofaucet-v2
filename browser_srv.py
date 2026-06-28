@@ -1,69 +1,85 @@
 #!/usr/bin/env python3
 """
-Browser API — pure http.server (NO Flask)
-Single Playwright instance, thread-safe request handling
+browser_srv.py — SINGLE-THREAD browser control server
+NO Flask, NO threading — pure socket. Zero greenlet errors.
+
+Hermes controls me via: curl http://localhost:5001/...
 """
-import os, sys, json, time, base64, threading, traceback
+import socket, json, time, base64, os, sys, traceback
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+
+LOG = []
+def log(msg, t="I"):
+    p = {"I":"·","S":"+","W":"!","E":"X","C":">","T":"#","V":"*"}
+    ts = datetime.now().strftime('%H:%M:%S')
+    line = f"[{ts}] {p.get(t,'·')} {msg}"
+    LOG.append(line)
+    print(line, flush=True)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 SS_DIR = os.path.join(BASE, "screenshots")
 os.makedirs(SS_DIR, exist_ok=True)
 
-LOG = []
-def log(msg, t="I"):
-    p = {"I":"·","S":"+","W":"!","E":"x","C":">","T":"\"","V":"*"}
-    ts = datetime.now().strftime('%H:%M:%S')
-    line = f"[{ts}] {p.get(t,'·')} {msg}"
-    LOG.append(line)
-    if len(LOG) > 500: LOG.pop(0)
-    print(line, flush=True)
-
-# ============================================================
-# Playwright
-# ============================================================
+# ── Playwright ──────────────────────────────────────
 from playwright.sync_api import sync_playwright
 
-PLAYWRIGHT = None
+PW = None
 BROWSER = None
 CONTEXT = None
 PAGE = None
-LOCK = threading.Lock()
 
-def ensure_browser():
-    global PLAYWRIGHT, BROWSER, CONTEXT, PAGE
-    if PLAYWRIGHT:
-        return True
+def start_browser():
+    global PW, BROWSER, CONTEXT, PAGE
+    if BROWSER: return True
     try:
-        PLAYWRIGHT = sync_playwright().start()
-        BROWSER = PLAYWRIGHT.chromium.launch(
+        PW = sync_playwright().start()
+        BROWSER = PW.chromium.launch(
             headless=False,
-            args=['--start-maximized', '--no-sandbox']
+            args=['--start-maximized', '--disable-blink-features=AutomationControlled',
+                  '--no-sandbox', '--disable-dev-shm-usage']
         )
         CONTEXT = BROWSER.new_context(no_viewport=True)
         PAGE = CONTEXT.new_page()
-        PAGE.set_default_timeout(15000)
+        PAGE.set_default_timeout(30000)
         log("Browser VISIBLE started!", "S")
         return True
     except Exception as e:
-        log(f"Browser start: {e}", "E")
+        log(f"Browser fail: {e}", "E")
         return False
 
-def get_text():
+def close_browser():
+    global BROWSER, PW
     try:
-        return PAGE.evaluate("document.body.innerText")[:5000]
-    except: return ""
+        if BROWSER: BROWSER.close()
+        if PW: PW.stop()
+    except: pass
+    BROWSER = None; PW = None
+    log("Browser closed", "I")
 
-def take_screenshot():
-    path = os.path.join(SS_DIR, f"ss_{datetime.now().strftime('%H%M%S')}.png")
+# ── Actions ──────────────────────────────────────────
+def do_screenshot():
     try:
-        PAGE.screenshot(path=path)
-        return path
-    except: return None
+        b = PAGE.screenshot(full_page=False)
+        return 200, {"image_base64": base64.b64encode(b).decode()}
+    except Exception as e:
+        return 500, {"error": str(e)}
 
-def click_by_text(text):
+def do_status():
+    try:
+        url = PAGE.url
+        title = PAGE.title()
+        text = PAGE.evaluate("document.body.innerText")[:1000]
+        return 200, {"browser": True, "url": url, "title": title, "text": text}
+    except Exception as e:
+        return 200, {"browser": True, "error": str(e)}
+
+def do_click(data):
+    text = data.get("text", "")
+    if not text:
+        return 400, {"error": "no text"}
+    
+    # Strategy: try multiple selectors + iframes + JS
     sels = [f'text={text}', f'*:text-is("{text}")', f'*:has-text("{text}")',
             f'button:has-text("{text}")', f'a:has-text("{text}")', f'span:has-text("{text}")']
     for w in text.split()[:3]:
@@ -72,235 +88,261 @@ def click_by_text(text):
     for sel in sels:
         try:
             el = PAGE.locator(sel)
-            if el.count() > 0 and el.first.is_visible():
+            if el.count() > 0:
                 el.first.click(timeout=3000)
-                return True
+                time.sleep(1)
+                return 200, {"success": True, "method": sel}
         except: pass
     
-    # Frames
-    for f in PAGE.frames[1:]:
+    # Iframes
+    for fr in PAGE.frames[1:]:
         for sel in [f'text={text}', f'*:has-text("{text}")']:
             try:
-                el = f.locator(sel)
+                el = fr.locator(sel)
                 if el.count() > 0:
                     el.first.click(timeout=3000)
-                    return True
+                    time.sleep(1)
+                    return 200, {"success": True, "method": f"iframe:{sel}"}
             except: pass
-    return False
+    
+    # JS XPath
+    try:
+        for w in text.split():
+            r = PAGE.evaluate(f"""() => {{
+                const x = document.evaluate("//*[text()[contains(., '{w}')]]", document, null,
+                    XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                if(x.singleNodeValue) {{ x.singleNodeValue.click(); return true; }}
+                return false;
+            }}""")
+            if r: time.sleep(1); return 200, {"success": True, "method": "xpath"}
+    except: pass
+    
+    return 200, {"success": False, "text": text}
 
-# ============================================================
-# HTTP Handler
-# ============================================================
-class Handler(BaseHTTPRequestHandler):
+def do_type(data):
+    text = data.get("text", "")
+    target = data.get("target", "")
     
-    def _json(self, data, code=200):
-        body = json.dumps(data).encode()
-        self.send_response(code)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', len(body))
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
-        self.wfile.write(body)
-    
-    def _read_body(self):
-        length = int(self.headers.get('Content-Length', 0))
-        if length:
-            return json.loads(self.rfile.read(length))
-        return {}
-    
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-        self.end_headers()
-    
-    def do_GET(self):
-        path = urlparse(self.path).path
-        
-        with LOCK:
-            if path == '/api/status':
-                url, title = "", ""
-                try:
-                    url = PAGE.url
-                    title = PAGE.title()
-                except: pass
-                self._json({"browser": True, "url": url, "title": title,
-                           "text": get_text()[:500]})
-            
-            elif path == '/api/screenshot':
-                ss = take_screenshot()
-                if ss:
-                    with open(ss, "rb") as f:
-                        b64 = base64.b64encode(f.read()).decode()
-                    self._json({"success": True, "image_base64": b64})
-                else:
-                    self._json({"success": False})
-            
-            elif path == '/api/logs':
-                self._json({"logs": LOG[-50:]})
-            
-            else:
-                self._json({"error": "not found"}, 404)
-    
-    def do_POST(self):
-        path = urlparse(self.path).path
-        data = self._read_body()
-        
-        with LOCK:
+    # Try to find input by target text
+    if target:
+        for sel in ['input[type="text"]', 'input[type="email"]', 'input[type="password"]',
+                    'input:not([type="hidden"])', 'textarea', 'div[contenteditable="true"]',
+                    'div[role="textbox"]']:
             try:
-                if path == '/api/action':
-                    action = data.get('action', '')
-                    
-                    if action == 'navigate':
-                        url = data.get('url', '')
-                        PAGE.goto(url, wait_until="domcontentloaded", timeout=30000)
-                        time.sleep(2)
-                        self._json({"success": True, "url": url})
-                    
-                    elif action == 'click_text':
-                        text = data.get('text', '')
-                        ok = click_by_text(text)
-                        self._json({"success": ok, "text": text})
-                    
-                    elif action == 'click_coords':
-                        x = float(data.get('x', 0.5))
-                        y = float(data.get('y', 0.5))
-                        vp = PAGE.viewport_size or {"width": 1920, "height": 1080}
-                        PAGE.mouse.click(int(x*vp["width"]), int(y*vp["height"]))
-                        self._json({"success": True})
-                    
-                    elif action == 'type':
-                        text = data.get('text', '')
-                        target = data.get('target', '')
-                        if target:
-                            click_by_text(target)
-                            time.sleep(0.3)
-                        # Try to find input
-                        found = False
-                        for sel in ['input[type="text"]', 'input[type="email"]', 
-                                    'input[type="password"]', 'input:not([type="hidden"])',
-                                    'textarea', 'div[contenteditable="true"]']:
-                            try:
-                                el = PAGE.locator(sel)
-                                if el.count() > 0 and el.first.is_visible():
-                                    el.first.fill(text)
-                                    found = True
-                                    break
-                            except: pass
-                        if not found:
-                            PAGE.keyboard.type(text, delay=50)
-                        self._json({"success": True})
-                    
-                    elif action == 'fill':
-                        text = data.get('text', '')
-                        sel = data.get('selector', '')
-                        if sel:
-                            try:
-                                el = PAGE.locator(sel)
-                                if el.count() > 0:
-                                    el.first.fill(text)
-                                    self._json({"success": True})
-                                    return
-                            except: pass
-                        self._json({"success": False, "error": "no element"})
-                    
-                    elif action == 'press_key':
-                        key = data.get('key', 'Enter')
-                        PAGE.keyboard.press(key)
-                        self._json({"success": True})
-                    
-                    elif action == 'scroll':
-                        d = data.get('direction', 'down')
-                        px = int(data.get('pixels', 500))
-                        PAGE.evaluate(f"window.scrollBy(0, {px if d=='down' else -px})")
-                        self._json({"success": True})
-                    
-                    elif action == 'screenshot':
-                        ss = take_screenshot()
-                        with open(ss, "rb") as f:
-                            b64 = base64.b64encode(f.read()).decode()
-                        self._json({"success": True, "image_base64": b64})
-                    
-                    elif action == 'get_text':
-                        self._json({"success": True, "text": get_text()})
-                    
-                    elif action == 'check_continue':
-                        found = False
-                        for txt in ["Continue in Browser", "Open in Browser", "Open App"]:
-                            for sel in [f'text={txt}', f'*:text-is("{txt}")', f'span:has-text("{txt}")']:
-                                try:
-                                    el = PAGE.locator(sel)
-                                    if el.count() > 0 and el.first.is_visible():
-                                        el.first.click(timeout=2000)
-                                        found = True
-                                        break
-                                except: pass
-                            if found: break
-                        if not found:
-                            for f in PAGE.frames[1:]:
-                                for txt in ["Continue in Browser", "Open in Browser"]:
-                                    try:
-                                        el = f.locator(f'text={txt}')
-                                        if el.count() > 0:
-                                            el.first.click(timeout=2000)
-                                            found = True
-                                            break
-                                    except: pass
-                                    if found: break
-                        self._json({"success": True, "clicked": found})
-                    
-                    elif action == 'wait':
-                        sec = int(data.get('seconds', 3))
-                        time.sleep(sec)
-                        self._json({"success": True})
-                    
-                    else:
-                        self._json({"success": False, "error": f"unknown: {action}"})
-                
-                else:
-                    self._json({"error": "not found"}, 404)
+                el = PAGE.locator(sel)
+                if el.count() > 0:
+                    el.first.click()
+                    time.sleep(0.3)
+                    el.first.fill(text)
+                    time.sleep(0.5)
+                    return 200, {"success": True}
+            except: pass
+    
+    # Keyboard type
+    PAGE.keyboard.type(text, delay=50)
+    time.sleep(0.5)
+    return 200, {"success": True}
+
+def do_navigate(data):
+    url = data.get("url", "")
+    if not url: return 400, {"error": "no url"}
+    PAGE.goto(url, wait_until="domcontentloaded", timeout=30000)
+    time.sleep(2)
+    return 200, {"success": True, "url": url}
+
+def do_press(data):
+    key = data.get("key", "Enter")
+    PAGE.keyboard.press(key)
+    return 200, {"success": True, "key": key}
+
+def do_scroll(data):
+    d = data.get("direction", "down")
+    px = int(data.get("pixels", 500))
+    if d == "down": PAGE.evaluate(f"window.scrollBy(0, {px})")
+    else: PAGE.evaluate(f"window.scrollBy(0, -{px})")
+    return 200, {"success": True}
+
+def do_text():
+    try:
+        text = PAGE.evaluate("document.body.innerText")
+        return 200, {"text": text[:10000]}
+    except: return 500, {"error": "fail"}
+
+def do_wait(data):
+    sec = int(data.get("seconds", 3))
+    time.sleep(sec)
+    return 200, {"waited": sec}
+
+def do_check_continue():
+    """Find and click Continue in Browser"""
+    for txt in ["Continue in Browser", "Open in Browser", "Continue", "Open App"]:
+        for sel in [f'text={txt}', f'*:text-is("{txt}")', f'*:has-text("{txt}")']:
+            try:
+                el = PAGE.locator(sel)
+                if el.count() > 0:
+                    el.first.click(timeout=2000)
+                    time.sleep(1)
+                    return 200, {"clicked": True, "text": txt}
+            except: pass
+    return 200, {"clicked": False}
+
+
+# ── HTTP ROUTER ──────────────────────────────────────
+def handle_request(method, path, query, body):
+    """Route HTTP request to the right action"""
+    
+    if path == "/" or path == "":
+        return 200, {"name": "browser_srv", "version": "1.0", 
+                     "actions": "status,screenshot,click,type,navigate,press,scroll,text,wait,check_continue"}
+    
+    elif path == "/api/status":
+        return do_status()
+    
+    elif path == "/api/screenshot":
+        return do_screenshot()
+    
+    elif path == "/api/action":
+        action = query.get("action", [body.get("action", "")])[0] if isinstance(query.get("action"), list) else body.get("action", "")
+        if not action:
+            return 400, {"error": "no action"}
+        
+        if action == "screenshot": return do_screenshot()
+        elif action == "status": return do_status()
+        elif action == "click_text" or action == "click": return do_click(body)
+        elif action == "click_coords":
+            x = float(body.get("x", 0.5)); y = float(body.get("y", 0.5))
+            vp = PAGE.viewport_size or {"width": 1920, "height": 1080}
+            PAGE.mouse.click(int(x * vp["width"]), int(y * vp["height"]))
+            return 200, {"success": True}
+        elif action == "type": return do_type(body)
+        elif action == "navigate": return do_navigate(body)
+        elif action == "press_key" or action == "press": return do_press(body)
+        elif action == "scroll": return do_scroll(body)
+        elif action == "text" or action == "get_text": return do_text()
+        elif action == "wait": return do_wait(body)
+        elif action == "check_continue": return do_check_continue()
+        elif action == "eval" or action == "evaluate":
+            js = body.get("js", "")
+            r = PAGE.evaluate(js)
+            return 200, {"result": str(r)[:2000]}
+        else:
+            return 400, {"error": f"unknown action: {action}"}
+    
+    elif path == "/api/logs":
+        n = int(query.get("n", [50])[0]) if isinstance(query.get("n"), list) else int(query.get("n", 50))
+        return 200, {"logs": LOG[-n:]}
+    
+    else:
+        return 404, {"error": f"not found: {path}"}
+
+
+# ── HTTP Server ──────────────────────────────────────
+def parse_http(data):
+    """Parse raw HTTP into method, path, query, body"""
+    try:
+        parts = data.split(b"\r\n\r\n", 1)
+        header = parts[0].decode("utf-8", errors="replace")
+        body_raw = parts[1] if len(parts) > 1 else b""
+        
+        lines = header.split("\r\n")
+        first = lines[0].split(" ")
+        method = first[0]
+        full_path = first[1] if len(first) > 1 else "/"
+        
+        parsed = urlparse(full_path)
+        path = parsed.path
+        query_str = parse_qs(parsed.query)
+        
+        body = {}
+        if body_raw:
+            try:
+                body = json.loads(body_raw.decode("utf-8"))
+            except:
+                try:
+                    body = dict(parse_qs(body_raw.decode("utf-8")))
+                except:
+                    pass
+        
+        return method, path, query_str, body
+    except Exception as e:
+        log(f"Parse error: {e}", "W")
+        return "GET", "/", {}, {}
+
+def run_server(host="0.0.0.0", port=5001):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    sock.listen(5)
+    sock.settimeout(1.0)  # 1s timeout so we can check keyboard interrupt
+    
+    log(f"Listening on {host}:{port}", "S")
+    
+    while True:
+        try:
+            conn, addr = sock.accept()
+            log(f"Connected: {addr[0]}", "I")
             
+            try:
+                conn.settimeout(10)
+                data = b""
+                while True:
+                    try:
+                        chunk = conn.recv(8192)
+                        if not chunk: break
+                        data += chunk
+                        if b"\r\n\r\n" in data:
+                            content_len = 0
+                            for line in data.split(b"\r\n"):
+                                if line.lower().startswith(b"content-length:"):
+                                    content_len = int(line.split(b":")[1].strip())
+                            if content_len == 0 or len(data.split(b"\r\n\r\n", 1)[1]) >= content_len:
+                                break
+                    except socket.timeout:
+                        break
+                
+                if data:
+                    method, path, query, body = parse_http(data)
+                    
+                    try:
+                        code, result = handle_request(method, path, query, body)
+                    except Exception as e:
+                        code, result = 500, {"error": str(e)}
+                        traceback.print_exc()
+                    
+                    if isinstance(result, dict):
+                        result = json.dumps(result, default=str)
+                    resp = f"HTTP/1.1 {code} OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: {len(result.encode())}\r\n\r\n{result}"
+                    conn.sendall(resp.encode())
+                else:
+                    conn.sendall(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
             except Exception as e:
-                self._json({"success": False, "error": str(e)})
+                log(f"Conn error: {e}", "W")
+            finally:
+                conn.close()
+        
+        except socket.timeout:
+            continue
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            log(f"Accept error: {e}", "W")
+            time.sleep(0.1)
     
-    def log_message(self, format, *args):
-        msg = format % args
-        if "/api/" in msg:
-            log(f"HTTP: {msg}", "I")
+    sock.close()
+    log("Server stopped", "I")
 
-# ============================================================
-# Main
-# ============================================================
-from socketserver import ThreadingMixIn
-
-# NO threading — Playwright sync API only works on main thread
-# Using plain HTTPServer with sequential request handling
-#
-# We use request queue: each request is handled synchronously
-# on the main thread. Since only one client (Hermes), this is fine.
-
-class SequentialHTTPServer(HTTPServer):
-    """Single-threaded HTTP server — Playwright requires main thread"""
-    allow_reuse_address = True
-    timeout = 0.5  # Allow KeyboardInterrupt detection
-
+# ── MAIN ─────────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.getenv("API_PORT", "5001"))
-    log("="*50)
+    log("=" * 50, "I")
     log("BROWSER API — pure http.server", "S")
-    log(f"Port {port}", "S")
-    log("="*50)
+    log(f"Port 5001", "S")
+    log("=" * 50, "I")
     
-    ensure_browser()
-    
-    server = SequentialHTTPServer(("0.0.0.0", port), Handler)
-    log(f"Listening on :{port}", "S")
+    start_browser()
     
     try:
-        server.serve_forever()
+        run_server("0.0.0.0", 5001)
     except KeyboardInterrupt:
-        log("Shutting down...")
+        pass
     finally:
-        if BROWSER: BROWSER.close()
-        if PLAYWRIGHT: PLAYWRIGHT.stop()
+        close_browser()
